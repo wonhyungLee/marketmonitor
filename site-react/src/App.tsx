@@ -13,10 +13,11 @@ import {
   Cell,
   Brush,
 } from "recharts";
-import { format, parseISO, subYears } from "date-fns";
+import { format, parseISO, subYears, endOfWeek, endOfMonth } from "date-fns";
 import { useWarRoomData } from "@/hooks/useWarRoomData";
 import { cn } from "@/lib/utils";
 import { RefreshCw, Search, Filter, Maximize2, X } from "lucide-react";
+import type { MarketStateRow } from "@/types";
 
 const STATE_COLORS = {
   WARMUP: "#3498db",
@@ -27,12 +28,15 @@ const STATE_COLORS = {
 
 const STATE_ORDER = ["WARMUP", "NORMAL", "DEFCON2", "DEFCON1"];
 
+type Period = "day" | "week" | "month";
+
 export default function App() {
   const { data, loading, error, reload } = useWarRoomData();
   const [dateRange, setDateRange] = useState({ start: "", end: "" });
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [isExpanded, setIsExpanded] = useState(false);
+  const [period, setPeriod] = useState<Period>("day");
   
   // Filters
   const [enabledStates, setEnabledStates] = useState<Set<string>>(
@@ -43,7 +47,6 @@ export default function App() {
   // Initialize date range
   useEffect(() => {
     if (data && !dateRange.start) {
-      // Default to last 1 year
       const end = data.maxDate;
       const start = format(subYears(parseISO(end), 1), "yyyy-MM-dd");
       setDateRange({ start, end });
@@ -58,7 +61,6 @@ export default function App() {
     if (type === "1y") start = format(subYears(parseISO(end), 1), "yyyy-MM-dd");
     if (type === "5y") start = format(subYears(parseISO(end), 5), "yyyy-MM-dd");
     
-    // Clamp to minDate
     if (start < data.minDate) start = data.minDate;
     setDateRange({ start, end });
   };
@@ -70,21 +72,63 @@ export default function App() {
     setEnabledStates(next);
   };
 
+  // Aggregate Data by Period
+  const aggregatedData = useMemo(() => {
+    if (!data) return { states: [], nasdaq: [] };
+    if (period === "day") return data;
+
+    const grouped = new Map<string, MarketStateRow[]>();
+    
+    data.states.forEach(row => {
+      const date = parseISO(row.date);
+      let key = "";
+      if (period === "week") key = format(endOfWeek(date, { weekStartsOn: 1 }), "yyyy-MM-dd");
+      else key = format(endOfMonth(date), "yyyy-MM-dd");
+      
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key)!.push(row);
+    });
+
+    const newStates: MarketStateRow[] = [];
+    const sortedKeys = Array.from(grouped.keys()).sort();
+
+    sortedKeys.forEach(key => {
+      const rows = grouped.get(key)!;
+      const lastRow = rows[rows.length - 1];
+      
+      const validScores = rows.map(r => r.score).filter(s => s !== null) as number[];
+      const avgScore = validScores.length ? validScores.reduce((a, b) => a + b, 0) / validScores.length : null;
+
+      const stateCounts: Record<string, number> = {};
+      rows.forEach(r => { stateCounts[r.state] = (stateCounts[r.state] || 0) + 1; });
+      const dominantState = Object.entries(stateCounts).sort((a, b) => b[1] - a[1])[0][0] as any;
+
+      newStates.push({
+        ...lastRow,
+        date: key,
+        state: dominantState,
+        score: avgScore,
+        triggers: `${rows.length} days aggregated. Last: ${lastRow.triggers}`
+      });
+    });
+
+    return { ...data, states: newStates };
+  }, [data, period]);
+
   // Filter Data
   const filteredRows = useMemo(() => {
-    if (!data) return [];
-    let rows = data.states.filter((r) => r.date >= dateRange.start && r.date <= dateRange.end);
+    const sourceData = aggregatedData;
+    if (!sourceData) return [];
     
-    // Filter by State checkbox
+    let rows = sourceData.states.filter((r) => r.date >= dateRange.start && r.date <= dateRange.end);
+    
     rows = rows.filter(r => enabledStates.has(r.state));
 
-    // Filter by Only Trading Days (requires NASDAQ data presence)
-    if (onlyTradingDays) {
-      const tradingDays = new Set(data.nasdaq.map(n => n.date));
+    if (onlyTradingDays && period === "day") {
+      const tradingDays = new Set(data?.nasdaq.map(n => n.date));
       rows = rows.filter(r => tradingDays.has(r.date));
     }
 
-    // Filter by Search
     if (searchTerm) {
       const lower = searchTerm.toLowerCase();
       rows = rows.filter(
@@ -95,22 +139,33 @@ export default function App() {
       );
     }
     return rows;
-  }, [data, dateRange, enabledStates, onlyTradingDays, searchTerm]);
+  }, [aggregatedData, data, dateRange, enabledStates, onlyTradingDays, searchTerm, period]);
 
   // Chart Data
   const chartData = useMemo(() => {
-    if (!data) return [];
-    const rangeRows = data.states.filter((r) => r.date >= dateRange.start && r.date <= dateRange.end);
+    if (!aggregatedData || !data) return [];
+    const rangeRows = aggregatedData.states.filter((r) => r.date >= dateRange.start && r.date <= dateRange.end);
     
     const nasdaqMap = new Map(data.nasdaq.map((n) => [n.date, n.close]));
-    return rangeRows.map((s) => ({
-      date: s.date,
-      close: nasdaqMap.get(s.date) || null,
-      state: s.state,
-      score: s.score,
-      triggers: s.triggers,
-    }));
-  }, [data, dateRange]);
+    
+    return rangeRows.map((s) => {
+      let close = nasdaqMap.get(s.date);
+      if (close === undefined && period !== "day") {
+         const dates = Array.from(nasdaqMap.keys()).sort();
+         const idx = dates.findIndex(d => d > s.date);
+         if (idx > 0) close = nasdaqMap.get(dates[idx-1]);
+         else if (idx === -1) close = nasdaqMap.get(dates[dates.length-1]);
+      }
+
+      return {
+        date: s.date,
+        close: close || null,
+        state: s.state,
+        score: s.score,
+        triggers: s.triggers,
+      };
+    });
+  }, [aggregatedData, data, dateRange, period]);
 
   // State Mix Stats
   const stateCounts = useMemo(() => {
@@ -152,14 +207,45 @@ export default function App() {
     }
   };
 
-  // Custom Tooltip for Expanded View
+  const handleWheelZoom = (e: React.WheelEvent) => {
+    if (!data) return;
+    const ZOOM_SPEED = 0.1;
+    const currentStart = parseISO(dateRange.start).getTime();
+    const currentEnd = parseISO(dateRange.end).getTime();
+    const totalDuration = currentEnd - currentStart;
+    
+    const zoomFactor = e.deltaY < 0 ? (1 - ZOOM_SPEED) : (1 + ZOOM_SPEED);
+    let newDuration = totalDuration * zoomFactor;
+    
+    const minDuration = 30 * 24 * 60 * 60 * 1000;
+    const maxDuration = parseISO(data.maxDate).getTime() - parseISO(data.minDate).getTime();
+    
+    if (newDuration < minDuration) newDuration = minDuration;
+    if (newDuration > maxDuration) newDuration = maxDuration;
+
+    const center = currentStart + totalDuration / 2;
+    let newStart = center - newDuration / 2;
+    let newEnd = center + newDuration / 2;
+
+    const absMin = parseISO(data.minDate).getTime();
+    const absMax = parseISO(data.maxDate).getTime();
+
+    if (newStart < absMin) { newStart = absMin; newEnd = newStart + newDuration; }
+    if (newEnd > absMax) { newEnd = absMax; newStart = newEnd - newDuration; }
+
+    setDateRange({
+      start: format(newStart, "yyyy-MM-dd"),
+      end: format(newEnd, "yyyy-MM-dd"),
+    });
+  };
+
+  // Custom Tooltip
   const ExpandedTooltip = ({ active, payload, label }: any) => {
     if (active && payload && payload.length && data) {
       const row = payload[0].payload;
       let port = data.portfolio.get(row.date);
       let displayDate = row.date;
 
-      // Fallback for portfolio
       if (!port) {
         const dates = Array.from(data.portfolio.keys()).sort();
         const idx = dates.findIndex(d => d > row.date);
@@ -183,12 +269,11 @@ export default function App() {
                 color: STATE_COLORS[row.state as keyof typeof STATE_COLORS],
               }}
             >
-              {row.state} (Score: {row.score})
+              {row.state} (Score: {row.score?.toFixed(2)})
             </span>
           </div>
           
           <div className="space-y-4">
-            {/* Market Info */}
             <div>
               <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1">Market State</div>
               <div className="flex justify-between items-center mb-1">
@@ -202,7 +287,6 @@ export default function App() {
               )}
             </div>
 
-            {/* Portfolio Info */}
             {port && (
               <div>
                 <div className="flex items-center justify-between mb-2">
@@ -258,13 +342,28 @@ export default function App() {
       {isExpanded && (
         <div className="fixed inset-0 z-50 bg-white flex flex-col animate-in fade-in zoom-in-95 duration-200">
           <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 bg-white/80 backdrop-blur sticky top-0 z-10">
-            <div>
+            <div className="flex items-center gap-6">
               <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
                 Detailed Analysis
                 <span className="text-sm font-normal text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">
                   {dateRange.start} ~ {dateRange.end}
                 </span>
               </h2>
+              {/* Period Toggle in Modal */}
+              <div className="flex bg-slate-100 p-1 rounded-lg">
+                {(["day", "week", "month"] as const).map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => setPeriod(p)}
+                    className={cn(
+                      "px-3 py-1 text-xs font-semibold uppercase rounded-md transition-all",
+                      period === p ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700"
+                    )}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
             </div>
             <button 
               onClick={() => setIsExpanded(false)}
@@ -273,7 +372,7 @@ export default function App() {
               <X className="h-6 w-6" />
             </button>
           </div>
-          <div className="flex-1 p-6 bg-slate-50/30">
+          <div className="flex-1 p-6 bg-slate-50/30" onWheel={handleWheelZoom}>
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 80 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
@@ -337,7 +436,7 @@ export default function App() {
               {/* Expand Button */}
               <button 
                 onClick={() => setIsExpanded(true)}
-                className="absolute top-5 right-5 p-2 bg-white shadow-sm border border-slate-200 rounded-lg text-slate-400 hover:text-indigo-600 hover:border-indigo-200 hover:shadow transition-all opacity-0 group-hover:opacity-100 z-10"
+                className="absolute bottom-16 right-5 p-2 bg-white shadow-md border border-slate-200 rounded-lg text-slate-500 hover:text-indigo-600 hover:border-indigo-200 transition-all z-10 opacity-0 group-hover:opacity-100"
                 title="Expand Chart"
               >
                 <Maximize2 className="h-5 w-5" />
@@ -345,6 +444,22 @@ export default function App() {
 
               {/* Controls */}
               <div className="flex flex-wrap gap-4 items-end">
+                {/* Period Toggle */}
+                <div className="flex bg-slate-100 p-1 rounded-lg">
+                  {(["day", "week", "month"] as const).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setPeriod(p)}
+                      className={cn(
+                        "px-3 py-1 text-xs font-semibold uppercase rounded-md transition-all",
+                        period === p ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700"
+                      )}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+
                 {/* Date Range */}
                 <div className="flex items-center gap-2 bg-slate-50 p-1.5 rounded-lg border border-slate-200">
                   <input
@@ -429,10 +544,7 @@ export default function App() {
                     axisLine={false}
                     tickLine={false}
                   />
-                  <Tooltip
-                    contentStyle={{ borderRadius: "12px", border: "none", boxShadow: "0 10px 15px -3px rgb(0 0 0 / 0.1)" }}
-                    labelStyle={{ fontWeight: "bold", color: "#1e293b", marginBottom: "0.5rem" }}
-                  />
+                  <Tooltip content={<ExpandedTooltip />} />
                   {refAreas.map((area, idx) => (
                     <ReferenceArea
                       key={idx}
