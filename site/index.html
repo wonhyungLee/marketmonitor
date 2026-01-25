@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MarketMonitor - NASDAQ + Market State</title>
+    <meta name="description" content="NASDAQ close + WarRoom market state timeline (table + charts)" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="hero">
+        <div class="hero-title">
+          <div class="kicker">MarketMonitor</div>
+          <h1>NASDAQ + Market State</h1>
+          <p class="sub">
+            Uses NASDAQ daily close + <code>data/market_states_daily.csv</code> + <code>data/portfolio_daily.csv</code> to
+            visualize regimes and recommended allocations.
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button class="btn btn-quiet" id="btnReload" type="button">Reload Data</button>
+        </div>
+      </header>
+
+      <section class="card" id="cardLoad" hidden>
+        <div class="card-head">
+          <h2>Load Data</h2>
+          <p class="muted">
+            If you opened this file via <code>file://</code>, the browser may block loading CSVs. Use a local server
+            (recommended) or pick files manually.
+          </p>
+        </div>
+        <div class="load-grid">
+          <label class="filebox">
+            <span class="filebox-title">NASDAQ (1D CSV)</span>
+            <input id="fileNasdaq" type="file" accept=".csv" />
+            <span class="filebox-hint">Expected: <code>NASDAQ_DLY_IXIC, 1D.csv</code></span>
+          </label>
+          <label class="filebox">
+            <span class="filebox-title">Market States (CSV)</span>
+            <input id="fileStates" type="file" accept=".csv" />
+            <span class="filebox-hint">Expected: <code>market_states_daily.csv</code></span>
+          </label>
+          <label class="filebox">
+            <span class="filebox-title">Portfolio (CSV)</span>
+            <input id="filePortfolio" type="file" accept=".csv" />
+            <span class="filebox-hint">Optional: <code>portfolio_daily.csv</code></span>
+          </label>
+        </div>
+        <div class="load-actions">
+          <button class="btn" id="btnLoadFiles" type="button">Load Selected Files</button>
+          <span class="muted" id="loadStatus"></span>
+        </div>
+      </section>
+
+      <section class="grid">
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <h2>Chart</h2>
+              <p class="muted">Line: NASDAQ close. Background: market state.</p>
+            </div>
+            <div class="controls">
+              <div class="control">
+                <span class="control-label">Range</span>
+                <div class="range">
+                  <input id="startDate" type="date" />
+                  <span class="range-sep">to</span>
+                  <input id="endDate" type="date" />
+                </div>
+              </div>
+              <div class="control">
+                <span class="control-label">Quick</span>
+                <div class="seg">
+                  <button class="seg-btn" data-range="1y" type="button">1Y</button>
+                  <button class="seg-btn" data-range="5y" type="button">5Y</button>
+                  <button class="seg-btn" data-range="max" type="button">Max</button>
+                </div>
+              </div>
+              <div class="control">
+                <span class="control-label">States</span>
+                <div class="checks">
+                  <label class="check"><input type="checkbox" data-state="WARMUP" checked />WARMUP</label>
+                  <label class="check"><input type="checkbox" data-state="NORMAL" checked />NORMAL</label>
+                  <label class="check"><input type="checkbox" data-state="DEFCON2" checked />DEFCON2</label>
+                  <label class="check"><input type="checkbox" data-state="DEFCON1" checked />DEFCON1</label>
+                </div>
+              </div>
+              <div class="control">
+                <span class="control-label">Table</span>
+                <label class="check"><input id="onlyTradingDays" type="checkbox" checked />Only trading days</label>
+              </div>
+            </div>
+          </div>
+          <div class="chart" id="chartMain" aria-label="NASDAQ and state chart"></div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <h2>State Mix</h2>
+              <p class="muted">Counts within the selected range.</p>
+            </div>
+          </div>
+          <div class="chart chart-sm" id="chartMix" aria-label="State distribution chart"></div>
+          <div class="stats" id="stats"></div>
+        </section>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div>
+            <h2>Daily Table</h2>
+            <p class="muted">
+              Joined by date: state + score + trend + allocation + portfolio (if available) + NASDAQ close.
+            </p>
+          </div>
+          <div class="table-tools">
+            <input id="search" class="search" type="search" placeholder="Filter triggers text..." />
+          </div>
+        </div>
+        <div class="portfolio-panel" id="portfolioPanel">
+          <div class="portfolio-line">
+            <span class="portfolio-label">Portfolio</span>
+            <span class="portfolio-date" id="portfolioDate">—</span>
+            <span class="portfolio-meta" id="portfolioMeta">Click a point on the chart to view allocations.</span>
+          </div>
+          <div class="portfolio-weights" id="portfolioWeights"></div>
+        </div>
+        <div class="table-wrap">
+          <table class="table" id="dataTable">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>State</th>
+                <th class="num">Score</th>
+                <th>Trend</th>
+                <th class="num">Equity %</th>
+                <th>Action</th>
+                <th class="num">Gross</th>
+                <th class="num">Cash %</th>
+                <th>Portfolio (Top)</th>
+                <th class="num">NASDAQ Close</th>
+                <th>Triggers</th>
+              </tr>
+            </thead>
+            <tbody id="tableBody"></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button class="btn btn-quiet" id="btnPrev" type="button">Prev</button>
+          <span class="muted" id="pageInfo"></span>
+          <button class="btn btn-quiet" id="btnNext" type="button">Next</button>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div class="muted">
+          Tip: run <code>python -m http.server 8000</code> from the repo root, then open
+          <code>http://localhost:8000/site/</code>.
+        </div>
+      </footer>
+    </main>
+
+    <script src="./app.js?v=20260124_final"></script>
+  </body>
+</html>

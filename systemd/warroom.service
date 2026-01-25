@@ -1,0 +1,15 @@
+[Unit]
+Description=WarRoom FastAPI ingest
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/시장감지모델
+EnvironmentFile=/home/ubuntu/시장감지모델/.env
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/home/ubuntu/시장감지모델/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
