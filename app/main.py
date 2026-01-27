@@ -47,8 +47,8 @@ def _get_trigger_ids() -> Set[str]:
     cfg = str(getattr(settings, "auto_refresh_trigger_series", "") or "").strip().upper()
     if cfg:
         return {s.strip() for s in cfg.split(",") if s.strip()}
-    # 기본값은 나스닥 (IXIC) 관련 별칭들을 포함하도록 유연하게 설정
-    return {"NASDAQ_DLY_IXIC", "IXIC", "NASDAQ", "US100"}
+    # 기본 트리거 자산 확장: 나스닥, 비트코인, 구리 등 주요 센서 포함
+    return {"NASDAQ_DLY_IXIC", "IXIC", "NASDAQ", "US100", "BTCUSD", "BTC", "COPPER", "T10Y2Y"}
 
 
 @app.exception_handler(RequestValidationError)
@@ -112,12 +112,15 @@ async def ingest(request: Request, background_tasks: BackgroundTasks, webhook_to
     input_id = payload.series_id.upper()
     trigger_set = _get_trigger_ids()
     
-    is_trigger = input_id in trigger_set or any(kw in input_id for kw in ["IXIC", "NASDAQ"])
+    # 키워드 매칭 및 명시적 리스트 매칭 결합
+    is_trigger = input_id in trigger_set or any(kw in input_id for kw in ["IXIC", "NASDAQ", "BTC", "COPPER"])
 
     if is_trigger:
         # 3. 비동기 작업 지시 (서버 응답은 즉시 반환)
         logger.info(f"Triggering background update for series: {input_id}")
         background_tasks.add_task(run_daily_job)
+    else:
+        logger.info(f"Ingested {input_id}, but not a trigger. Skipping background job.")
 
     return {"status": "ok", "ingested": input_id, "background_job": is_trigger}
 

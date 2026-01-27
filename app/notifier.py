@@ -1,28 +1,147 @@
 import logging
-from typing import Dict, Optional
+import time
+from typing import Dict, Optional, Tuple
 
 import requests
 
-from app.engine import EngineResult
+from app.models import EngineResult
 from app.settings import get_settings
 
-
+# Discord Embed colors (hex as int)
 COLORS = {
-    "WARMUP": 0x3498DB,
-    "NORMAL": 0x2ECC71,
-    "DEFCON2": 0xE67E22,
-    "DEFCON1": 0xE74C3C,
+    "WARMUP": 0x3498DB,  # Blue
+    "NORMAL": 0x2ECC71,  # Green
+    "DEFCON2": 0xE67E22,  # Orange
+    "DEFCON1": 0xE74C3C,  # Red
 }
 
 EMOJI = {
-    "WARMUP": "🟦",
-    "NORMAL": "🟢",
-    "DEFCON2": "🟠",
-    "DEFCON1": "🔴",
+    "WARMUP": "⚙️",
+    "NORMAL": "✅",
+    "DEFCON2": "⚠️",
+    "DEFCON1": "🚨",
 }
 
 logger = logging.getLogger("warroom.notifier")
 
+
+def _truncate(text: str, limit: int = 1800) -> str:
+    """Discord content is limited (generally 2000 chars). Keep a safety margin."""
+    if text is None:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 15] + "…(truncated)"
+
+
+def _safe_preview(text: str, limit: int = 500) -> str:
+    if text is None:
+        return ""
+    return text if len(text) <= limit else (text[:limit] + "…")
+
+
+def _parse_retry_after(headers: dict) -> Optional[float]:
+    ra = headers.get("Retry-After") or headers.get("retry-after")
+    if not ra:
+        return None
+    try:
+        return float(ra)
+    except Exception:
+        return None
+
+
+def _post_with_retry(
+    client: requests.Session,
+    url: str,
+    payload: dict,
+    timeout_sec: int,
+    retry_max: int,
+) -> Tuple[bool, Optional[int], str]:
+    """Send a Discord webhook with basic retry + rate-limit handling.
+
+    Returns (ok, status_code, message).
+    """
+    backoff = 1.0
+    last_status: Optional[int] = None
+    last_msg = ""
+
+    for attempt in range(1, max(1, retry_max) + 1):
+        try:
+            resp = client.post(url, json=payload, timeout=timeout_sec)
+            last_status = resp.status_code
+            last_msg = _safe_preview(resp.text)
+
+            # Success
+            if resp.status_code in (200, 204):
+                return True, resp.status_code, "ok"
+
+            # Rate limited
+            if resp.status_code == 429:
+                wait = _parse_retry_after(resp.headers) or backoff
+                logger.warning(
+                    "discord rate-limited (429). attempt=%s/%s wait=%.1fs body=%s",
+                    attempt,
+                    retry_max,
+                    wait,
+                    _safe_preview(resp.text),
+                )
+                if attempt >= retry_max:
+                    return False, resp.status_code, "rate-limited"
+                time.sleep(min(wait, 60.0))
+                backoff = min(backoff * 2.0, 30.0)
+                continue
+
+            # Temporary server errors
+            if 500 <= resp.status_code < 600:
+                logger.warning(
+                    "discord server error. status=%s attempt=%s/%s wait=%.1fs body=%s",
+                    resp.status_code,
+                    attempt,
+                    retry_max,
+                    backoff,
+                    _safe_preview(resp.text),
+                )
+                if attempt >= retry_max:
+                    return False, resp.status_code, "server-error"
+                time.sleep(backoff)
+                backoff = min(backoff * 2.0, 30.0)
+                continue
+
+            # Payload issues (often 400). Try a simplified payload once.
+            if resp.status_code == 400 and payload.get("embeds"):
+                logger.warning(
+                    "discord rejected payload (400). Retrying with simplified content-only payload. body=%s",
+                    _safe_preview(resp.text),
+                )
+                simplified = {"content": payload.get("content", "[WarRoom] update")}
+                payload = simplified
+                # don't consume a retry with extra sleep here
+                continue
+
+            # Other 4xx are usually permanent (bad URL, perms, etc.)
+            logger.error(
+                "discord webhook failed. status=%s body=%s",
+                resp.status_code,
+                _safe_preview(resp.text),
+            )
+            return False, resp.status_code, "client-error"
+
+        except requests.exceptions.RequestException as exc:
+            last_msg = str(exc)
+            logger.warning(
+                "discord request error. attempt=%s/%s wait=%.1fs error=%s",
+                attempt,
+                retry_max,
+                backoff,
+                exc,
+                exc_info=True,
+            )
+            if attempt >= retry_max:
+                return False, last_status, "request-exception"
+            time.sleep(backoff)
+            backoff = min(backoff * 2.0, 30.0)
+
+    return False, last_status, last_msg or "unknown"
 
 def build_embed(result: EngineResult) -> Dict:
     color = COLORS.get(result.state, COLORS["NORMAL"])
@@ -121,16 +240,34 @@ def build_embed(result: EngineResult) -> Dict:
     return embed
 
 
-def notify(result: EngineResult, session: Optional[requests.Session] = None) -> None:
+def notify(result: EngineResult, session: Optional[requests.Session] = None) -> bool:
     settings = get_settings()
-    if not settings.discord_webhook_url:
-        logger.warning("DISCORD_WEBHOOK_URL not set; skipping notification")
-        return
+    if not getattr(settings, "discord_enabled", True):
+        logger.info("Discord notifications disabled (DISCORD_ENABLED=false)")
+        return False
 
-    payload = {"embeds": [build_embed(result)]}
+    url = (settings.discord_webhook_url or "").strip()
+    if not url:
+        logger.warning("DISCORD_WEBHOOK_URL not set; skipping notification")
+        return False
+    if not (url.startswith("http://") or url.startswith("https://")):
+        logger.error("DISCORD_WEBHOOK_URL looks invalid (missing http/https). skipping.")
+        return False
+
+    content = _truncate(f"[WarRoom] {result.as_of_date} | {result.state} | score={result.score}")
+    payload = {"content": content, "embeds": [build_embed(result)]}
     client = session or requests.Session()
-    resp = client.post(settings.discord_webhook_url, json=payload, timeout=10)
-    if resp.status_code >= 300:
-        logger.error("failed to send discord webhook: %s %s", resp.status_code, resp.text)
-    else:
+    ok, status, msg = _post_with_retry(
+        client=client,
+        url=url,
+        payload=payload,
+        timeout_sec=getattr(settings, "discord_timeout_sec", 8),
+        retry_max=getattr(settings, "discord_retry_max", 3),
+    )
+
+    if ok:
         logger.info("discord webhook sent")
+        return True
+
+    logger.error("discord webhook not sent. status=%s reason=%s", status, msg)
+    return False

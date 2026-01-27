@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     webhook_token: str = Field(..., env="WEBHOOK_TOKEN")
     db_path: str = Field("./warroom.db", env="DB_PATH")
     discord_webhook_url: str = Field("", env="DISCORD_WEBHOOK_URL")
+    # Discord notifications
+    discord_enabled: bool = Field(True, env="DISCORD_ENABLED")
+    discord_timeout_sec: int = Field(8, env="DISCORD_TIMEOUT_SEC")
+    discord_retry_max: int = Field(3, env="DISCORD_RETRY_MAX")
     timezone: str = Field("Asia/Seoul", env="TIMEZONE")
     as_of_tz: str = Field("America/New_York", env="AS_OF_TZ")
     log_level: str = Field("INFO", env="LOG_LEVEL")

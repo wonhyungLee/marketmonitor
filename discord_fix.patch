@@ -1,0 +1,276 @@
+diff -ruN /mnt/data/marketmonitor-orig/marketmonitor-main/.env.example /mnt/data/marketmonitor-main/.env.example
+--- /mnt/data/marketmonitor-orig/marketmonitor-main/.env.example	2026-01-27 08:36:45.000000000 +0000
++++ /mnt/data/marketmonitor-main/.env.example	2026-01-27 11:21:08.830994483 +0000
+@@ -3,6 +3,9 @@
+ WEBHOOK_TOKEN=change-me-long-random
+ DB_PATH=./warroom.db
+ DISCORD_WEBHOOK_URL=
++DISCORD_ENABLED=true
++DISCORD_TIMEOUT_SEC=8
++DISCORD_RETRY_MAX=3
+ TIMEZONE=Asia/Seoul
+ AS_OF_TZ=America/New_York
+ LOG_LEVEL=INFO
+diff -ruN /mnt/data/marketmonitor-orig/marketmonitor-main/app/notifier.py /mnt/data/marketmonitor-main/app/notifier.py
+--- /mnt/data/marketmonitor-orig/marketmonitor-main/app/notifier.py	2026-01-27 08:36:45.000000000 +0000
++++ /mnt/data/marketmonitor-main/app/notifier.py	2026-01-27 11:21:54.606244431 +0000
+@@ -1,5 +1,6 @@
+ import logging
+-from typing import Dict, Optional
++import time
++from typing import Dict, Optional, Tuple
+ 
+ import requests
+ 
+@@ -24,6 +25,125 @@
+ logger = logging.getLogger("warroom.notifier")
+ 
+ 
++def _truncate(text: str, limit: int = 1800) -> str:
++    """Discord content is limited (generally 2000 chars). Keep a safety margin."""
++    if text is None:
++        return ""
++    if len(text) <= limit:
++        return text
++    return text[: limit - 15] + "…(truncated)"
++
++
++def _safe_preview(text: str, limit: int = 500) -> str:
++    if text is None:
++        return ""
++    return text if len(text) <= limit else (text[:limit] + "…")
++
++
++def _parse_retry_after(headers: dict) -> Optional[float]:
++    ra = headers.get("Retry-After") or headers.get("retry-after")
++    if not ra:
++        return None
++    try:
++        return float(ra)
++    except Exception:
++        return None
++
++
++def _post_with_retry(
++    client: requests.Session,
++    url: str,
++    payload: dict,
++    timeout_sec: int,
++    retry_max: int,
++) -> Tuple[bool, Optional[int], str]:
++    """Send a Discord webhook with basic retry + rate-limit handling.
++
++    Returns (ok, status_code, message).
++    """
++    backoff = 1.0
++    last_status: Optional[int] = None
++    last_msg = ""
++
++    for attempt in range(1, max(1, retry_max) + 1):
++        try:
++            resp = client.post(url, json=payload, timeout=timeout_sec)
++            last_status = resp.status_code
++            last_msg = _safe_preview(resp.text)
++
++            # Success
++            if resp.status_code in (200, 204):
++                return True, resp.status_code, "ok"
++
++            # Rate limited
++            if resp.status_code == 429:
++                wait = _parse_retry_after(resp.headers) or backoff
++                logger.warning(
++                    "discord rate-limited (429). attempt=%s/%s wait=%.1fs body=%s",
++                    attempt,
++                    retry_max,
++                    wait,
++                    _safe_preview(resp.text),
++                )
++                if attempt >= retry_max:
++                    return False, resp.status_code, "rate-limited"
++                time.sleep(min(wait, 60.0))
++                backoff = min(backoff * 2.0, 30.0)
++                continue
++
++            # Temporary server errors
++            if 500 <= resp.status_code < 600:
++                logger.warning(
++                    "discord server error. status=%s attempt=%s/%s wait=%.1fs body=%s",
++                    resp.status_code,
++                    attempt,
++                    retry_max,
++                    backoff,
++                    _safe_preview(resp.text),
++                )
++                if attempt >= retry_max:
++                    return False, resp.status_code, "server-error"
++                time.sleep(backoff)
++                backoff = min(backoff * 2.0, 30.0)
++                continue
++
++            # Payload issues (often 400). Try a simplified payload once.
++            if resp.status_code == 400 and payload.get("embeds"):
++                logger.warning(
++                    "discord rejected payload (400). Retrying with simplified content-only payload. body=%s",
++                    _safe_preview(resp.text),
++                )
++                simplified = {"content": payload.get("content", "[WarRoom] update")}
++                payload = simplified
++                # don't consume a retry with extra sleep here
++                continue
++
++            # Other 4xx are usually permanent (bad URL, perms, etc.)
++            logger.error(
++                "discord webhook failed. status=%s body=%s",
++                resp.status_code,
++                _safe_preview(resp.text),
++            )
++            return False, resp.status_code, "client-error"
++
++        except requests.exceptions.RequestException as exc:
++            last_msg = str(exc)
++            logger.warning(
++                "discord request error. attempt=%s/%s wait=%.1fs error=%s",
++                attempt,
++                retry_max,
++                backoff,
++                exc,
++                exc_info=True,
++            )
++            if attempt >= retry_max:
++                return False, last_status, "request-exception"
++            time.sleep(backoff)
++            backoff = min(backoff * 2.0, 30.0)
++
++    return False, last_status, last_msg or "unknown"
++
++
+ def build_embed(result: EngineResult) -> Dict:
+     color = COLORS.get(result.state, COLORS["NORMAL"])
+     emoji = EMOJI.get(result.state, "")
+@@ -121,16 +241,34 @@
+     return embed
+ 
+ 
+-def notify(result: EngineResult, session: Optional[requests.Session] = None) -> None:
++def notify(result: EngineResult, session: Optional[requests.Session] = None) -> bool:
+     settings = get_settings()
+-    if not settings.discord_webhook_url:
++    if not getattr(settings, "discord_enabled", True):
++        logger.info("Discord notifications disabled (DISCORD_ENABLED=false)")
++        return False
++
++    url = (settings.discord_webhook_url or "").strip()
++    if not url:
+         logger.warning("DISCORD_WEBHOOK_URL not set; skipping notification")
+-        return
++        return False
++    if not (url.startswith("http://") or url.startswith("https://")):
++        logger.error("DISCORD_WEBHOOK_URL looks invalid (missing http/https). skipping.")
++        return False
+ 
+-    payload = {"embeds": [build_embed(result)]}
++    content = _truncate(f"[WarRoom] {result.as_of_date} | {result.state} | score={result.score}")
++    payload = {"content": content, "embeds": [build_embed(result)]}
+     client = session or requests.Session()
+-    resp = client.post(settings.discord_webhook_url, json=payload, timeout=10)
+-    if resp.status_code >= 300:
+-        logger.error("failed to send discord webhook: %s %s", resp.status_code, resp.text)
+-    else:
++    ok, status, msg = _post_with_retry(
++        client=client,
++        url=url,
++        payload=payload,
++        timeout_sec=getattr(settings, "discord_timeout_sec", 8),
++        retry_max=getattr(settings, "discord_retry_max", 3),
++    )
++
++    if ok:
+         logger.info("discord webhook sent")
++        return True
++
++    logger.error("discord webhook not sent. status=%s reason=%s", status, msg)
++    return False
+diff -ruN /mnt/data/marketmonitor-orig/marketmonitor-main/app/settings.py /mnt/data/marketmonitor-main/app/settings.py
+--- /mnt/data/marketmonitor-orig/marketmonitor-main/app/settings.py	2026-01-27 08:36:45.000000000 +0000
++++ /mnt/data/marketmonitor-main/app/settings.py	2026-01-27 11:20:57.511215265 +0000
+@@ -9,6 +9,10 @@
+     webhook_token: str = Field(..., env="WEBHOOK_TOKEN")
+     db_path: str = Field("./warroom.db", env="DB_PATH")
+     discord_webhook_url: str = Field("", env="DISCORD_WEBHOOK_URL")
++    # Discord notifications
++    discord_enabled: bool = Field(True, env="DISCORD_ENABLED")
++    discord_timeout_sec: int = Field(8, env="DISCORD_TIMEOUT_SEC")
++    discord_retry_max: int = Field(3, env="DISCORD_RETRY_MAX")
+     timezone: str = Field("Asia/Seoul", env="TIMEZONE")
+     as_of_tz: str = Field("America/New_York", env="AS_OF_TZ")
+     log_level: str = Field("INFO", env="LOG_LEVEL")
+diff -ruN /mnt/data/marketmonitor-orig/marketmonitor-main/scripts/run_daily.py /mnt/data/marketmonitor-main/scripts/run_daily.py
+--- /mnt/data/marketmonitor-orig/marketmonitor-main/scripts/run_daily.py	2026-01-27 08:36:45.000000000 +0000
++++ /mnt/data/marketmonitor-main/scripts/run_daily.py	2026-01-27 11:22:12.611177633 +0000
+@@ -30,7 +30,13 @@
+             export_asset_universe_csv(conn)
+             
+             # 3. 디스코드 알림 발송
+-            notify(result)
++            # NOTE: Discord 전송 실패는 전체 작업 실패로 취급하지 않는다.
++            try:
++                sent = notify(result)
++                if not sent:
++                    logger.warning("Discord notification not sent (see notifier logs)")
++            except Exception:
++                logger.exception("Discord notification raised an unexpected error; continuing")
+             
+             logger.info(f"Daily job completed successfully for {result.as_of_date}")
+             return result
+diff -ruN /mnt/data/marketmonitor-orig/marketmonitor-main/scripts/test_discord_webhook.py /mnt/data/marketmonitor-main/scripts/test_discord_webhook.py
+--- /mnt/data/marketmonitor-orig/marketmonitor-main/scripts/test_discord_webhook.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/marketmonitor-main/scripts/test_discord_webhook.py	2026-01-27 11:22:29.716979773 +0000
+@@ -0,0 +1,47 @@
++"""Standalone Discord webhook test.
++
++Usage:
++  python scripts/test_discord_webhook.py --text "hello"
++
++Exit code:
++  0 = success, 1 = failure
++"""
++
++import argparse
++import os
++import sys
++
++import requests
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--text", required=True, help="text to send")
++    parser.add_argument("--timeout", type=int, default=8)
++    args = parser.parse_args()
++
++    url = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
++    if not url:
++        print("DISCORD_WEBHOOK_URL is not set")
++        return 1
++    if not (url.startswith("http://") or url.startswith("https://")):
++        print("DISCORD_WEBHOOK_URL looks invalid (missing http/https)")
++        return 1
++
++    payload = {"content": args.text}
++    try:
++        resp = requests.post(url, json=payload, timeout=args.timeout)
++    except requests.exceptions.RequestException as e:
++        print(f"request failed: {e}")
++        return 1
++
++    if resp.status_code in (200, 204):
++        print("ok")
++        return 0
++
++    print(f"failed: status={resp.status_code} body={resp.text[:500]}")
++    return 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
