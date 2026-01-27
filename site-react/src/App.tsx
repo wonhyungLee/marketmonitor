@@ -197,12 +197,13 @@ export default function App() {
   };
 
   // Quick Range Handlers
-  const setRange = (type: "1y" | "5y" | "max") => {
+  const setRange = (type: "1y" | "5y" | "10y" | "max") => {
     if (!data) return;
     const end = data.maxDate;
     let start = data.minDate;
     if (type === "1y") start = format(subYears(parseISO(end), 1), "yyyy-MM-dd");
     if (type === "5y") start = format(subYears(parseISO(end), 5), "yyyy-MM-dd");
+    if (type === "10y") start = format(subYears(parseISO(end), 10), "yyyy-MM-dd");
     
     if (start < data.minDate) start = data.minDate;
     setDateRange({ start, end });
@@ -675,7 +676,7 @@ export default function App() {
               </div>
               {/* Quick Buttons in Modal */}
               <div className="flex bg-slate-100 p-1 rounded-lg">
-                {["1y", "5y", "max"].map((t) => (
+                {["1y", "5y", "10y", "max"].map((t) => (
                   <button
                     key={t}
                     onClick={() => setRange(t as any)}
@@ -825,7 +826,7 @@ export default function App() {
 
                   {/* Quick Buttons */}
                   <div className="flex bg-slate-50 p-1 rounded-lg border border-slate-200">
-                    {["1y", "5y", "max"].map((t) => (
+                    {["1y", "5y", "10y", "max"].map((t) => (
                       <button
                         key={t}
                         onClick={() => setRange(t as any)}
