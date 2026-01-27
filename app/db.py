@@ -2,14 +2,21 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Any
 
 
 def get_connection(db_path: str) -> sqlite3.Connection:
+    """
+    고성능 및 동시성 처리를 위해 설정된 DB 연결을 반환합니다.
+    - WAL 모드: 읽기와 쓰기가 서로를 차단하지 않음
+    - Timeout: 30초 설정으로 작업 경합 시 대기 유도
+    """
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    # Institutional Choice: 고가용성을 위한 WAL 모드 활성화
     conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
 
@@ -50,7 +57,7 @@ def insert_observation(
     interval: str,
     value: float,
     received_at: str,
-    payload: Dict,
+    payload: Dict[str, Any],
 ) -> None:
     cur = conn.cursor()
     cur.execute(
@@ -76,8 +83,8 @@ def insert_daily_state(
     as_of_date: str,
     state: str,
     score: Optional[float],
-    reasons: Dict,
-    health: Dict,
+    reasons: Dict[str, Any],
+    health: Dict[str, Any],
     created_at: str,
 ) -> None:
     cur = conn.cursor()
@@ -132,7 +139,7 @@ def fetch_observations_for_series(
     if not ids:
         return []
     placeholders = ", ".join(["?"] * len(ids))
-    params: List[str] = list(ids)
+    params: List[Any] = list(ids)
     query = f"""
         SELECT series_id, time_utc_ms, interval, value
         FROM market_observations

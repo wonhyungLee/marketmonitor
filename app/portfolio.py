@@ -279,17 +279,31 @@ def recommend_portfolio(as_of: date, macro_state: str, conn=None) -> Optional[Po
     need = max(ma_win, vol_win + 1)
 
     for asset_id in px.columns:
-        s = px_upto[asset_id].dropna()
+        # Strict alignment: do not dropna() here. Use the full series up to as_of.
+        s = px_upto[asset_id]
         if len(s) < need:
             diagnostics[asset_id] = {"eligible": False, "reason": f"need>={need} obs", "have": int(len(s))}
             continue
 
         price = float(s.iloc[-1])
-        ma = float(s.tail(ma_win).mean()) if ma_win > 1 else float("nan")
-        trend_up = price >= ma if (ma_win > 1 and math.isfinite(ma)) else True
+        if not math.isfinite(price):
+            diagnostics[asset_id] = {"eligible": False, "reason": "missing data on current date"}
+            continue
 
-        rets = s.pct_change(fill_method=None).tail(vol_win).dropna()
-        vol_ann = float(rets.std()) * math.sqrt(252) if len(rets) >= 2 else float("nan")
+        ma_series = s.tail(ma_win)
+        if ma_series.isna().any():
+            ma = float("nan")
+        else:
+            ma = float(ma_series.mean())
+
+        trend_up = price >= ma if (ma_win > 1 and math.isfinite(ma)) else False
+
+        rets_series = s.pct_change(fill_method=None).tail(vol_win)
+        if rets_series.isna().any():
+            vol_ann = float("nan")
+        else:
+            rets_valid = rets_series.dropna()
+            vol_ann = float(rets_valid.std()) * math.sqrt(252) if len(rets_valid) >= 2 else float("nan")
 
         w = 0.0
         if trend_up and vol_ann > 0 and math.isfinite(vol_ann):

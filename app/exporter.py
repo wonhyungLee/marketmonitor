@@ -201,3 +201,36 @@ def export_series_csv(
 
 def export_nasdaq_1d_csv(conn, out_path: Optional[Path] = None) -> Path:
     return export_series_csv(conn, "NASDAQ_DLY_IXIC", "1D", out_path=out_path, value_column="close")
+
+
+def export_asset_universe_csv(conn, out_path: Optional[Path] = None) -> Path:
+    """
+    Export all observations from the database into a single pivoted CSV file.
+    Columns: date, series_id_1, series_id_2, ...
+    """
+    import pandas as pd
+    base_dir = Path(__file__).resolve().parent.parent
+    out_path = out_path or (base_dir / "data" / "asset_universe.csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rows = conn.execute(
+        """
+        SELECT series_id, time_utc_ms, value
+        FROM market_observations
+        ORDER BY time_utc_ms ASC
+        """
+    ).fetchall()
+
+    if not rows:
+        return out_path
+
+    df = pd.DataFrame(rows, columns=["series_id", "time_utc_ms", "value"])
+    df["date"] = pd.to_datetime(df["time_utc_ms"], unit="ms", utc=True).dt.date
+    
+    # Pivot: dates as index, series_ids as columns
+    # Handle duplicates by taking the last value for each date/series
+    pivot = df.pivot_table(index="date", columns="series_id", values="value", aggfunc="last")
+    pivot = pivot.sort_index()
+
+    pivot.to_csv(out_path, encoding="utf-8")
+    return out_path

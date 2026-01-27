@@ -175,7 +175,7 @@ export default function App() {
   }, [data]);
 
   // Toggle Date Selection
-  const toggleDate = (date: string) => {
+  const toggleDate = (date: string, shouldOpenPopup = true) => {
     const newSet = new Set(selectedDates);
     if (newSet.has(date)) {
       newSet.delete(date);
@@ -185,7 +185,9 @@ export default function App() {
     } else {
       newSet.add(date);
       setLastSelectedDate(date);
-      setShowDetailPopup(true); // Open detail popup on selection
+      if (shouldOpenPopup) {
+        setShowDetailPopup(true); // Open detail popup on selection
+      }
       setTimeout(() => {
         const row = document.getElementById(`row-${date}`);
         if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -344,7 +346,7 @@ export default function App() {
 
   const handleChartClick = (e: any) => {
     if (e && e.activeLabel) {
-      toggleDate(e.activeLabel);
+      toggleDate(e.activeLabel, false);
     }
   };
 

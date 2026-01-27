@@ -10,6 +10,7 @@ SERIES_ID_ALIASES = {
     "NASDAQ": "NASDAQ_DLY_IXIC",
     "US100": "NASDAQ_DLY_IXIC",
     "CAPITALCOM_US100": "NASDAQ_DLY_IXIC",
+    "FXCM_COPPER": "COPPER",
 }
 
 
@@ -107,11 +108,12 @@ class TradingViewPayload(BaseModel):
     def normalize_series_id(cls, v: str) -> str:
         if not isinstance(v, str):
             return v
-        raw = v.strip()
+        raw = v.strip().upper() # Always work with uppercase
         if not raw:
             return v
-        mapped = SERIES_ID_ALIASES.get(raw.upper())
-        return mapped or raw
+        # Map aliases (e.g., IXIC -> NASDAQ_DLY_IXIC)
+        mapped = SERIES_ID_ALIASES.get(raw)
+        return mapped or raw # Returns canonical name in uppercase
 
     @field_validator("value")
     def normalize_value(cls, v: Union[int, float, str]) -> float:

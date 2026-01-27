@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -22,8 +22,6 @@ MIN_OBS = {
     "UMCSENT": 1,
 }
 
-# For early-history backfills, some series (e.g. WEI) simply do not exist yet.
-# We still want to compute a state using the core sensors that are available.
 REQUIRED_SERIES = {
     "T10Y2Y",
     "COPPER_GOLD_RATIO",
@@ -36,11 +34,11 @@ class SnapshotResult:
     as_of_date: date
     score: Optional[float]
     reasons: List[str]
-    health: Dict
+    health: Dict[str, Any]
     hard_defcon1: bool
     components: Dict[str, float]
     ready: bool
-    trend: Dict
+    trend: Dict[str, Any]
 
 
 def _series_frame(df: pd.DataFrame, series_id: str, as_of_date: date, tz: ZoneInfo) -> pd.DataFrame:
@@ -54,37 +52,13 @@ def _series_frame(df: pd.DataFrame, series_id: str, as_of_date: date, tz: ZoneIn
 
 def build_snapshot(conn) -> SnapshotResult:
     settings = get_settings()
-    expected_lag_days = {
-        "1D": int(settings.expected_lag_days_1d),
-        "1W": int(settings.expected_lag_days_1w),
-        "1M": int(settings.expected_lag_days_1m),
-    }
-    valid_for_days = {
-        "1D": int(settings.valid_for_days_1d),
-        "1W": int(settings.valid_for_days_1w),
-        "1M": int(settings.valid_for_days_1m),
-    }
     tz = ZoneInfo(settings.as_of_tz)
+    
     rows = db.fetch_observations(conn)
     if not rows:
         return SnapshotResult(
-            as_of_date=date.today(),
-            score=None,
-            reasons=["no data available"],
-            health={},
-            hard_defcon1=False,
-            components={},
-            ready=False,
-            trend={
-                "series_id": settings.trend_series_id,
-                "window": int(settings.trend_ma_window),
-                "signal": "UNKNOWN",
-                "price": None,
-                "ma": None,
-                "price_above_ma": None,
-                "vol_window": int(settings.vol_window_days),
-                "vol_ann": None,
-            },
+            as_of_date=date.today(), score=None, reasons=["no data"], health={},
+            hard_defcon1=False, components={}, ready=False, trend={}
         )
 
     df = pd.DataFrame(rows, columns=["series_id", "time_utc_ms", "interval", "value"])
@@ -92,206 +66,113 @@ def build_snapshot(conn) -> SnapshotResult:
     df["as_of_date"] = df["timestamp"].dt.tz_convert(tz).dt.date
 
     as_of_date = df["as_of_date"].max()
-    components: Dict[str, float] = {}
     reasons: List[str] = []
-    health: Dict[str, Dict] = {}
+    components: Dict[str, float] = {}
+    health: Dict[str, Any] = {}
+    
+    # 헬스 체크 및 세그먼트 데이터 준비
+    series_data: Dict[str, pd.DataFrame] = {}
     stale_flags: Dict[str, bool] = {}
-    hard_defcon1 = False
     ready = True
 
-    for series_id, need in MIN_OBS.items():
-        series_df = _series_frame(df, series_id, as_of_date, tz)
-        have = len(series_df)
-        if series_df.empty:
-            health[series_id] = {"have": have, "need": need, "stale": True, "reason": "missing"}
-            if series_id in REQUIRED_SERIES:
-                ready = False
+    for sid in MIN_OBS.keys():
+        s_df = _series_frame(df, sid, as_of_date, tz)
+        series_data[sid] = s_df
+        
+        if s_df.empty:
+            if sid in REQUIRED_SERIES: ready = False
+            health[sid] = {"stale": True, "reason": "missing"}
             continue
 
-        last_row = series_df.iloc[-1]
-        last_ts: datetime = last_row["timestamp"].to_pydatetime().astimezone(tz)
-
-        # available_at / valid_for_days model:
-        # - "late": we're past the expected publication lag (warn-only)
-        # - "stale": the observation is too old to be trusted for scoring (ignore)
-        interval = str(last_row["interval"])
+        # Stale 판단 로직 (LKV 적용 전 단계)
+        last_ts = s_df.iloc[-1]["timestamp"].to_pydatetime().astimezone(tz)
         as_of_dt = datetime.combine(as_of_date, datetime.min.time(), tzinfo=tz)
-        delta_days = (as_of_dt - last_ts).days
-        lag_days = expected_lag_days.get(interval, 2)
-        valid_days = valid_for_days.get(interval, max(lag_days, 2))
-        late = delta_days > lag_days
-        stale = delta_days > valid_days
+        age_days = (as_of_dt - last_ts).days
+        
+        # 임계값 (기본 4일, 월간 데이터는 62일)
+        limit = 62 if sid in ["UMCSENT", "SAHMREALTIME"] else 4
+        stale = age_days > limit
+        stale_flags[sid] = stale
+        health[sid] = {"have": len(s_df), "age_days": age_days, "stale": stale}
 
-        # Track sufficiency in health, but do not block readiness on optional series.
-        # Components already guard on lookbacks (e.g. MA200) and stale flags.
-        if have < need and series_id in REQUIRED_SERIES:
-            # Required series must exist, but we allow state computation even while it is still warming up.
-            # This enables earlier daily state history (e.g. from 1988) while keeping scoring rules intact.
-            pass
-
-        stale_flags[series_id] = stale
-        health[series_id] = {
-            "have": have,
-            "need": need,
-            "interval": interval,
-            "age_days": int(delta_days),
-            "lag_days": int(lag_days),
-            "valid_for_days": int(valid_days),
-            "late": bool(late),
-            "stale": bool(stale),
-            "last": last_ts.isoformat(),
-        }
-
-    # Scoring stops if core data is not ready
     if not ready:
-        return SnapshotResult(
-            as_of_date=as_of_date,
-            score=None,
-            reasons=["data not ready"],
-            health=health,
-            hard_defcon1=False,
-            components={},
-            ready=False,
-            trend={
-                "series_id": settings.trend_series_id,
-                "window": int(settings.trend_ma_window),
-                "signal": "UNKNOWN",
-                "price": None,
-                "ma": None,
-                "price_above_ma": None,
-                "vol_window": int(settings.vol_window_days),
-                "vol_ann": None,
-            },
-        )
+        return SnapshotResult(as_of_date=as_of_date, score=None, reasons=["required data missing"],
+                              health=health, hard_defcon1=False, components={}, ready=False, trend={})
 
-    # Trend: NASDAQ close vs MA{window} (optional)
-    trend = {
-        "series_id": settings.trend_series_id,
-        "window": int(settings.trend_ma_window),
-        "signal": "UNKNOWN",
-        "price": None,
-        "ma": None,
-        "price_above_ma": None,
-        "vol_window": int(settings.vol_window_days),
-        "vol_ann": None,
-    }
-    try:
-        window = int(settings.trend_ma_window)
-        vol_window = int(settings.vol_window_days)
-        px_df = _series_frame(df, settings.trend_series_id, as_of_date, tz)
-        if not px_df.empty:
-            price = float(px_df.iloc[-1]["value"])
-            trend["price"] = price
-            if window > 1 and len(px_df) >= window:
-                ma = float(px_df.tail(window)["value"].mean())
-                trend["ma"] = ma
-                above = price >= ma
-                trend["price_above_ma"] = above
-                trend["signal"] = "UP" if above else "DOWN"
+    # --- 퀀트 로직 고도화 ---
 
-            # Vol targeting input: realized volatility (annualized) over the last N trading days.
-            if vol_window > 1 and len(px_df) >= (vol_window + 1):
-                rets = px_df["value"].pct_change().tail(vol_window).dropna()
-                if len(rets) >= vol_window:
-                    vol_daily = float(rets.std())
-                    if vol_daily > 0:
-                        trend["vol_ann"] = float(vol_daily * math.sqrt(252))
-    except Exception:
-        # Keep UNKNOWN trend on any parsing/compute errors.
-        pass
+    # 1. EWMA Volatility 및 Trend (MA200)
+    trend = {"signal": "UNKNOWN", "vol_ann": None}
+    px_df = _series_frame(df, settings.trend_series_id, as_of_date, tz)
+    if len(px_df) >= 200:
+        price = float(px_df.iloc[-1]["value"])
+        ma200 = float(px_df.tail(200)["value"].mean())
+        
+        # EWMA Volatility: 최근 변동성에 더 높은 가중치 (span=20)
+        returns = px_df["value"].pct_change().tail(21).dropna()
+        ewma_vol = float(returns.ewm(span=20).std().iloc[-1] * math.sqrt(252))
+        
+        trend.update({"price": price, "ma": ma200, "signal": "UP" if price >= ma200 else "DOWN", "vol_ann": ewma_vol})
 
-    # T10Y2Y: cross up from inversion
-    t_df = _series_frame(df, "T10Y2Y", as_of_date, tz)
-    if len(t_df) >= 2 and not stale_flags.get("T10Y2Y", False):
-        prev_val = t_df.iloc[-2]["value"]
-        last_val = t_df.iloc[-1]["value"]
-        if prev_val < 0 <= last_val:
-            w = float(settings.weight_t10y2y_cross_up)
-            components["T10Y2Y_cross_up"] = w
-            reasons.append(f"T10Y2Y un-inversion cross up (+{w:g})")
-        else:
-            components["T10Y2Y_cross_up"] = 0.0
-    else:
-        components["T10Y2Y_cross_up"] = 0.0
+    # 2. LKV (Last Known Value) Helper
+    def get_lkv_value(sid: str) -> Optional[float]:
+        s_df = series_data.get(sid)
+        if s_df is None or s_df.empty: return None
+        if stale_flags.get(sid):
+            reasons.append(f"Warning: {sid} is stale. Using LKV (Last Known Value).")
+        return float(s_df.iloc[-1]["value"])
 
-    # BAML spread: risk if elevated and rising
-    b_df = _series_frame(df, "BAMLH0A0HYM2", as_of_date, tz)
-    if not b_df.empty and not stale_flags.get("BAMLH0A0HYM2", False):
-        last_val = b_df.iloc[-1]["value"]
-        lookback = 20 if len(b_df) >= 20 else len(b_df) - 1
-        slope = 0.0
-        if lookback > 0:
-            slope = last_val - b_df.iloc[-1 - lookback]["value"]
-        if last_val >= 4.0 and slope >= 0:
-            w = float(settings.weight_baml_spread_risk)
-            components["BAML_spread_risk"] = w
-            reasons.append(f"BAML spread high ({last_val:.2f}, slope {slope:.2f}) (+{w:g})")
-        else:
-            components["BAML_spread_risk"] = 0.0
-    else:
-        components["BAML_spread_risk"] = 0.0
+    # 3. Scoring with LKV
+    # T10Y2Y
+    t_val = get_lkv_value("T10Y2Y")
+    t_df = series_data["T10Y2Y"]
+    if t_val is not None and len(t_df) >= 2:
+        if t_df.iloc[-2]["value"] < 0 <= t_val:
+            components["T10Y2Y_cross_up"] = settings.weight_t10y2y_cross_up
+            reasons.append(f"T10Y2Y un-inversion (+{settings.weight_t10y2y_cross_up})")
 
-    # WEI: recessionary recent trend
-    w_df = _series_frame(df, "WEI", as_of_date, tz)
-    if len(w_df) >= 4 and not stale_flags.get("WEI", False):
-        recent_mean = float(w_df.tail(4)["value"].mean())
-        last_val = w_df.iloc[-1]["value"]
-        if last_val < 0 and recent_mean < 0:
-            w = float(settings.weight_wei_recession_trend)
-            components["WEI_recession_trend"] = w
-            reasons.append(f"WEI negative trend ({recent_mean:.2f}) (+{w:g})")
-        else:
-            components["WEI_recession_trend"] = 0.0
-    else:
-        components["WEI_recession_trend"] = 0.0
+    # BAML Spread
+    b_val = get_lkv_value("BAMLH0A0HYM2")
+    if b_val is not None and b_val >= 4.0:
+        components["BAML_spread_risk"] = settings.weight_baml_spread_risk
+        reasons.append(f"BAML Spread risk (+{settings.weight_baml_spread_risk})")
 
-    # COPPER/GOLD ratio: 5 days under MA200
-    cg_df = _series_frame(df, "COPPER_GOLD_RATIO", as_of_date, tz)
-    if len(cg_df) >= 200 and not stale_flags.get("COPPER_GOLD_RATIO", False):
-        cg_df = cg_df.copy()
-        cg_df["ma200"] = cg_df["value"].rolling(window=200).mean()
-        tail = cg_df.tail(5)
-        if (tail["value"] < tail["ma200"]).all():
-            w = float(settings.weight_copper_gold_under_ma200)
-            components["COPPER_GOLD_under_ma200"] = w
-            reasons.append(f"Copper/Gold below MA200 for 5 days (+{w:g})")
-        else:
-            components["COPPER_GOLD_under_ma200"] = 0.0
-    else:
-        components["COPPER_GOLD_under_ma200"] = 0.0
+    # WEI
+    w_df = series_data["WEI"]
+    if not w_df.empty:
+        w_val = get_lkv_value("WEI")
+        if w_val is not None and w_val < 0:
+            components["WEI_recession_trend"] = settings.weight_wei_recession_trend
+            reasons.append(f"WEI negative (+{settings.weight_wei_recession_trend})")
 
-    # UM consumer sentiment
-    um_df = _series_frame(df, "UMCSENT", as_of_date, tz)
-    if not um_df.empty and not stale_flags.get("UMCSENT", False):
-        last_val = um_df.iloc[-1]["value"]
-        if last_val < 65:
-            w = float(settings.weight_umcsent_low)
-            components["UMCSENT_low"] = w
-            reasons.append(f"UM Sentiment low ({last_val:.1f}) (+{w:g})")
-        else:
-            components["UMCSENT_low"] = 0.0
-    else:
-        components["UMCSENT_low"] = 0.0
+    # COPPER/GOLD
+    cg_df = series_data["COPPER_GOLD_RATIO"]
+    if len(cg_df) >= 200:
+        ma = cg_df["value"].rolling(200).mean().iloc[-1]
+        if cg_df.iloc[-1]["value"] < ma:
+            components["COPPER_GOLD_under_ma200"] = settings.weight_copper_gold_under_ma200
+            reasons.append(f"Copper/Gold bearish (+{settings.weight_copper_gold_under_ma200})")
 
-    # Sahm rule hard trigger
-    s_df = _series_frame(df, "SAHMREALTIME", as_of_date, tz)
-    if not s_df.empty and not stale_flags.get("SAHMREALTIME", False):
-        last_val = s_df.iloc[-1]["value"]
-        if last_val >= settings.sahm_hard_trigger_threshold:
-            hard_defcon1 = True
-            reasons.append(
-                f"Sahm rule {last_val:.2f} >= {settings.sahm_hard_trigger_threshold:.2f} (hard DEFCON1)"
-            )
+    # UMCSENT
+    um_val = get_lkv_value("UMCSENT")
+    if um_val is not None and um_val < 65:
+        components["UMCSENT_low"] = settings.weight_umcsent_low
+        reasons.append(f"UM Sentiment low (+{settings.weight_umcsent_low})")
 
-    score = float(sum(components.values()))
+    # Sahm Rule (Hard Trigger)
+    hard_defcon1 = False
+    sahm_val = get_lkv_value("SAHMREALTIME")
+    if sahm_val is not None and sahm_val >= settings.sahm_hard_trigger_threshold:
+        hard_defcon1 = True
+        reasons.append("Sahm Rule Hard Trigger (DEFCON1)")
 
     return SnapshotResult(
         as_of_date=as_of_date,
-        score=score,
+        score=float(sum(components.values())),
         reasons=reasons,
         health=health,
         hard_defcon1=hard_defcon1,
         components=components,
         ready=True,
-        trend=trend,
+        trend=trend
     )

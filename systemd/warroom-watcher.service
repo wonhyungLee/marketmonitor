@@ -1,5 +1,5 @@
 [Unit]
-Description=WarRoom FastAPI ingest
+Description=WarRoom Watcher Service
 After=network.target
 
 [Service]
@@ -7,7 +7,7 @@ User=dldnjsrk
 WorkingDirectory=/home/dldnjsrk/remote-ubuntu/시장감지모델
 EnvironmentFile=/home/dldnjsrk/remote-ubuntu/시장감지모델/.env
 Environment="PYTHONUNBUFFERED=1"
-ExecStart=/home/dldnjsrk/remote-ubuntu/시장감지모델/.venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers
+ExecStart=/home/dldnjsrk/remote-ubuntu/시장감지모델/.venv/bin/python3 scripts/watcher.py
 Restart=always
 RestartSec=3
 
