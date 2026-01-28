@@ -4,7 +4,7 @@ from typing import Dict, Optional, Tuple
 
 import requests
 
-from app.models import EngineResult
+from app.engine import EngineResult
 from app.settings import get_settings
 
 # Discord Embed colors (hex as int)

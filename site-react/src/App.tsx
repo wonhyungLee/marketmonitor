@@ -124,6 +124,17 @@ export default function App() {
 
   const [isExpanded, setIsExpanded] = useState(false);
   const [period, setPeriod] = useState<Period>("day");
+  const [viewBasis, setViewBasis] = useState<"1x" | "2x">("2x");
+
+  const transformPortfolio = (p: any) => {
+    if (!p || viewBasis === "2x") return p;
+    return {
+      ...p,
+      gross: (p.gross || 0) / 2,
+      cash: 1 - ((p.gross || 0) / 2),
+      weights: p.weights.map((w: any) => ({ ...w, w: w.w / 2 })),
+    };
+  };
   
   // Language State
   const [lang, setLang] = useState<Lang>(() => {
@@ -402,6 +413,8 @@ export default function App() {
         }
       }
 
+      port = transformPortfolio(port);
+
       return (
         <div className="bg-white/95 backdrop-blur border border-slate-200 p-4 rounded-xl shadow-xl max-w-md w-[320px]">
           <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-100">
@@ -604,6 +617,8 @@ export default function App() {
                         displayDate = fallbackDate;
                       }
                     }
+
+                    p = transformPortfolio(p);
 
                     if (!p) return null;
 
@@ -1049,7 +1064,23 @@ export default function App() {
             <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 sticky top-6">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-lg font-bold text-slate-900">{t.portfolioDetail}</h2>
-                {lastSelectedDate && <span className="text-xs font-mono bg-slate-100 px-2 py-1 rounded text-slate-600">{lastSelectedDate}</span>}
+                <div className="flex items-center gap-2">
+                   <div className="flex bg-slate-100 p-0.5 rounded-lg">
+                      {(["1x", "2x"] as const).map((b) => (
+                        <button
+                          key={b}
+                          onClick={() => setViewBasis(b)}
+                          className={cn(
+                            "px-2 py-0.5 text-[10px] font-bold uppercase rounded-md transition-all",
+                            viewBasis === b ? "bg-white text-indigo-600 shadow-sm" : "text-slate-400 hover:text-slate-600"
+                          )}
+                        >
+                          {b}
+                        </button>
+                      ))}
+                   </div>
+                   {lastSelectedDate && <span className="text-xs font-mono bg-slate-100 px-2 py-1 rounded text-slate-600">{lastSelectedDate}</span>}
+                </div>
               </div>
               
               {lastSelectedDate ? (
@@ -1068,6 +1099,8 @@ export default function App() {
                         displayDate = fallbackDate;
                       }
                     }
+
+                    p = transformPortfolio(p);
 
                     return p ? (
                       <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
