@@ -50,22 +50,30 @@ def _series_frame(df: pd.DataFrame, series_id: str, as_of_date: date, tz: ZoneIn
     return subset
 
 
-def build_snapshot(conn) -> SnapshotResult:
+def build_snapshot(conn, as_of_date: Optional[date] = None, data_frame: Optional[pd.DataFrame] = None) -> SnapshotResult:
     settings = get_settings()
     tz = ZoneInfo(settings.as_of_tz)
-    
-    rows = db.fetch_observations(conn)
-    if not rows:
-        return SnapshotResult(
-            as_of_date=date.today(), score=None, reasons=["no data"], health={},
-            hard_defcon1=False, components={}, ready=False, trend={}
-        )
 
-    df = pd.DataFrame(rows, columns=["series_id", "time_utc_ms", "interval", "value"])
-    df["timestamp"] = pd.to_datetime(df["time_utc_ms"], unit="ms", utc=True)
-    df["as_of_date"] = df["timestamp"].dt.tz_convert(tz).dt.date
+    df = data_frame
+    if df is None:
+        rows = db.fetch_observations(conn)
+        if not rows:
+            return SnapshotResult(
+                as_of_date=date.today(), score=None, reasons=["no data"], health={},
+                hard_defcon1=False, components={}, ready=False, trend={}
+            )
+        df = pd.DataFrame(rows, columns=["series_id", "time_utc_ms", "interval", "value"])
 
-    as_of_date = df["as_of_date"].max()
+    if "timestamp" not in df.columns:
+        df["timestamp"] = pd.to_datetime(df["time_utc_ms"], unit="ms", utc=True)
+    if "as_of_date" not in df.columns:
+        df["as_of_date"] = df["timestamp"].dt.tz_convert(tz).dt.date
+
+    if isinstance(as_of_date, str):
+        as_of_date = date.fromisoformat(as_of_date)
+
+    if as_of_date is None:
+        as_of_date = df["as_of_date"].max()
     reasons: List[str] = []
     components: Dict[str, float] = {}
     health: Dict[str, Any] = {}

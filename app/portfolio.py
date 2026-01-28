@@ -226,22 +226,22 @@ def _load_asset_universe_from_db(conn) -> pd.DataFrame:
     return px
 
 
-def recommend_portfolio(as_of: date, macro_state: str, conn=None) -> Optional[PortfolioRecommendation]:
-    """
-    Recommend a multi-asset allocation from the asset universe CSV.
+def load_asset_universe(conn=None) -> pd.DataFrame:
+    if conn is not None:
+        px = _load_asset_universe_from_db(conn)
+        if not px.empty:
+            return px
+    return _load_asset_universe_from_csv()
 
-    Current model (v1): per-asset MA filter + per-asset vol targeting, then scale to leverage cap.
-    Macro state can optionally down-weight "risk assets" via PORTFOLIO_MACRO_MULTIPLIER_* settings.
-    """
-    settings = get_settings()
+
+def _compute_portfolio_from_px(
+    as_of: date, macro_state: str, px: pd.DataFrame, settings
+) -> Optional[PortfolioRecommendation]:
     model = str(getattr(settings, "portfolio_allocation_model", "") or "").strip().lower() or "multi_asset_trend_vol"
     if model not in ("multi_asset_trend_vol", "trend_vol", "trend_vol_target"):
         return None
 
-    px = _load_asset_universe_from_db(conn) if conn is not None else pd.DataFrame()
-    if px.empty:
-        px = _load_asset_universe_from_csv()
-    if px.empty:
+    if px is None or px.empty:
         return None
 
     # Align to the last available trading day <= as_of.
@@ -345,3 +345,19 @@ def recommend_portfolio(as_of: date, macro_state: str, conn=None) -> Optional[Po
         weights=weights,
         diagnostics=diagnostics,
     )
+
+
+def recommend_portfolio_from_px(
+    as_of: date, macro_state: str, px: pd.DataFrame
+) -> Optional[PortfolioRecommendation]:
+    settings = get_settings()
+    return _compute_portfolio_from_px(as_of, macro_state, px, settings)
+
+
+def recommend_portfolio(as_of: date, macro_state: str, conn=None) -> Optional[PortfolioRecommendation]:
+    """
+    Recommend a multi-asset allocation from the asset universe CSV/DB.
+    """
+    settings = get_settings()
+    px = load_asset_universe(conn)
+    return _compute_portfolio_from_px(as_of, macro_state, px, settings)

@@ -1,9 +1,13 @@
 import csv
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from zoneinfo import ZoneInfo
+
+from app.portfolio import load_asset_universe, recommend_portfolio_from_px
+from app.settings import get_settings
 
 CSV_HEADER = [
     "as_of_date",
@@ -233,4 +237,122 @@ def export_asset_universe_csv(conn, out_path: Optional[Path] = None) -> Path:
     pivot = pivot.sort_index()
 
     pivot.to_csv(out_path, encoding="utf-8")
+    return out_path
+
+
+def export_webhook_records_csv(conn, out_path: Optional[Path] = None) -> Path:
+    base_dir = Path(__file__).resolve().parent.parent
+    out_path = out_path or (base_dir / "data" / "webhook_records.csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rows = conn.execute(
+        """
+        SELECT series_id, time_utc_ms, interval, value, received_at
+        FROM market_observations
+        ORDER BY received_at ASC
+        """
+    ).fetchall()
+
+    with out_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["series_id", "time_utc_ms", "interval", "value", "received_at"])
+        writer.writerows(rows)
+
+    return out_path
+
+
+def _load_existing_portfolio_csv(out_path: Path) -> tuple[Dict[str, Dict[str, Any]], list[str]]:
+    if not out_path.exists():
+        return {}, []
+    with out_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        existing: Dict[str, Dict[str, Any]] = {}
+        for row in reader:
+            date = (row.get("date") or "").strip()
+            if date:
+                existing[date] = row
+    return existing, fieldnames
+
+
+def export_portfolio_recent_csv(
+    conn,
+    out_path: Optional[Path] = None,
+    days: int = 30,
+    end_date: Optional[date] = None,
+) -> Path:
+    base_dir = Path(__file__).resolve().parent.parent
+    out_path = out_path or (base_dir / "data" / "portfolio_daily.csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing, fieldnames = _load_existing_portfolio_csv(out_path)
+
+    settings = get_settings()
+    tz = ZoneInfo(settings.as_of_tz)
+
+    if end_date is None:
+        row = conn.execute("SELECT MAX(time_utc_ms) FROM market_observations").fetchone()
+        if not row or row[0] is None:
+            return out_path
+        dt = datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc).astimezone(tz)
+        end_date = dt.date()
+
+    start_date = end_date - timedelta(days=max(1, int(days)) - 1)
+
+    states = conn.execute(
+        """
+        SELECT as_of_date, state
+        FROM daily_states
+        WHERE as_of_date BETWEEN ? AND ?
+        ORDER BY as_of_date ASC
+        """,
+        (start_date.isoformat(), end_date.isoformat()),
+    ).fetchall()
+    state_map = {row[0]: row[1] for row in states}
+
+    px = load_asset_universe(conn)
+    if px.empty:
+        return out_path
+
+    weight_cols: set[str] = set()
+    cur = start_date
+    while cur <= end_date:
+        date_str = cur.isoformat()
+        state = state_map.get(date_str)
+        if state:
+            rec = recommend_portfolio_from_px(cur, state, px)
+            if rec is not None:
+                row = dict(existing.get(date_str, {}))
+                for k in list(row.keys()):
+                    if k.startswith("w_"):
+                        row.pop(k, None)
+                row["date"] = date_str
+                row["state"] = state
+                row["gross_exposure"] = f"{rec.gross_exposure:.6f}"
+                row["cash_weight"] = f"{rec.cash_weight:.6f}"
+                for asset, weight in rec.weights.items():
+                    col = f"w_{asset}"
+                    row[col] = f"{weight:.6f}"
+                    weight_cols.add(col)
+                existing[date_str] = row
+        cur += timedelta(days=1)
+
+    if not fieldnames:
+        fieldnames = ["date", "state", "gross_exposure", "cash_weight"]
+    if "date" not in fieldnames:
+        fieldnames.insert(0, "date")
+    for col in ("state", "gross_exposure", "cash_weight"):
+        if col not in fieldnames:
+            fieldnames.append(col)
+    for col in sorted(weight_cols):
+        if col not in fieldnames:
+            fieldnames.append(col)
+
+    with out_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for date_key in sorted(existing.keys()):
+            row = existing[date_key]
+            writer.writerow({k: row.get(k, "") for k in fieldnames})
+
     return out_path

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from app import db
@@ -147,8 +147,8 @@ def _decide_allocation(state: str, trend: Dict) -> Tuple[str, Optional[float]]:
     return _decide_allocation_fixed(state, trend)
 
 
-def evaluate(conn) -> EngineResult:
-    snapshot = build_snapshot(conn)
+def evaluate(conn, as_of_date: Optional[date] = None, data_frame=None) -> EngineResult:
+    snapshot = build_snapshot(conn, as_of_date=as_of_date, data_frame=data_frame)
     settings = get_settings()
 
     defcon2_th = float(settings.defcon2_score_threshold)
@@ -159,7 +159,8 @@ def evaluate(conn) -> EngineResult:
     raw_score = snapshot.score
     observed_raw_score = raw_score
 
-    recent_states = db.fetch_recent_states(conn, limit=30)
+    target_date = snapshot.as_of_date if as_of_date is None else as_of_date
+    recent_states = db.fetch_recent_states_upto(conn, str(target_date), limit=30)
     prev_state = recent_states[0]["state"] if recent_states else "NORMAL"
     prev_state = "NORMAL" if (snapshot.ready and prev_state == "WARMUP") else prev_state
     prev_raw_score = _raw_score_from_state_row(recent_states[0]) if recent_states else None

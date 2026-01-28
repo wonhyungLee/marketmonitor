@@ -45,10 +45,10 @@ if INDICATOR_DIR.exists():
 def _get_trigger_ids() -> Set[str]:
     """대소문자 무시를 위해 모든 트리거 ID를 대문자로 정규화하여 반환"""
     cfg = str(getattr(settings, "auto_refresh_trigger_series", "") or "").strip().upper()
-    if cfg:
-        return {s.strip() for s in cfg.split(",") if s.strip()}
-    # 기본 트리거 자산 확장: 나스닥, 비트코인, 구리 등 주요 센서 포함
-    return {"NASDAQ_DLY_IXIC", "IXIC", "NASDAQ", "US100", "BTCUSD", "BTC", "COPPER", "T10Y2Y"}
+    if not cfg or cfg in {"*", "ALL"}:
+        # Empty or wildcard means: trigger on any webhook.
+        return set()
+    return {s.strip() for s in cfg.split(",") if s.strip()}
 
 
 @app.exception_handler(RequestValidationError)
@@ -111,9 +111,14 @@ async def ingest(request: Request, background_tasks: BackgroundTasks, webhook_to
     # 2. 트리거 판정 (유연한 매칭 로직)
     input_id = payload.series_id.upper()
     trigger_set = _get_trigger_ids()
-    
+
     # 키워드 매칭 및 명시적 리스트 매칭 결합
-    is_trigger = input_id in trigger_set or any(kw in input_id for kw in ["IXIC", "NASDAQ", "BTC", "COPPER"])
+    if not getattr(settings, "auto_refresh_daily", True):
+        is_trigger = False
+    elif not trigger_set:
+        is_trigger = True
+    else:
+        is_trigger = input_id in trigger_set or any(kw in input_id for kw in ["IXIC", "NASDAQ", "BTC", "COPPER"])
 
     if is_trigger:
         # 3. 비동기 작업 지시 (서버 응답은 즉시 반환)

@@ -121,6 +121,22 @@ def fetch_recent_states(
     return cur.fetchall()
 
 
+def fetch_recent_states_upto(
+    conn: sqlite3.Connection, as_of_date: str, limit: int = 30
+) -> List[sqlite3.Row]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT * FROM daily_states
+        WHERE as_of_date <= ?
+        ORDER BY as_of_date DESC
+        LIMIT ?;
+        """,
+        (as_of_date, limit),
+    )
+    return cur.fetchall()
+
+
 def fetch_observations(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     cur = conn.cursor()
     cur.execute(

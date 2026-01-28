@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import {
   LineChart,
   Line,
@@ -125,6 +125,16 @@ export default function App() {
   const [isExpanded, setIsExpanded] = useState(false);
   const [period, setPeriod] = useState<Period>("day");
   const [viewBasis, setViewBasis] = useState<"1x" | "2x">("2x");
+  const [isPanning, setIsPanning] = useState(false);
+  const chartWrapRef = useRef<HTMLDivElement | null>(null);
+  const lastPanAtRef = useRef(0);
+  const dragRef = useRef({
+    active: false,
+    startX: 0,
+    startStart: 0,
+    startEnd: 0,
+    moved: false,
+  });
 
   const transformPortfolio = (p: any) => {
     if (!p || viewBasis === "2x") return p;
@@ -357,6 +367,7 @@ export default function App() {
   }, [chartData, enabledStates]);
 
   const handleChartClick = (e: any) => {
+    if (Date.now() - lastPanAtRef.current < 200) return;
     if (e && e.activeLabel) {
       toggleDate(e.activeLabel, false);
     }
@@ -393,6 +404,77 @@ export default function App() {
       end: format(newEnd, "yyyy-MM-dd"),
     });
   };
+
+  const startPan = (e: React.MouseEvent | React.PointerEvent) => {
+    if (!data || ("button" in e && e.button !== 0)) return;
+    if (!dateRange.start || !dateRange.end) return;
+    if (dragRef.current.active) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest(".recharts-brush")) return;
+
+    const container = chartWrapRef.current;
+    if (!container) return;
+    dragRef.current = {
+      active: true,
+      startX: e.clientX,
+      startStart: parseISO(dateRange.start).getTime(),
+      startEnd: parseISO(dateRange.end).getTime(),
+      moved: false,
+    };
+    setIsPanning(true);
+    e.preventDefault();
+  };
+
+  useEffect(() => {
+    const handleMove = (e: MouseEvent) => {
+      if (!dragRef.current.active || !data) return;
+      const container = chartWrapRef.current;
+      if (!container) return;
+      const width = container.clientWidth;
+      if (!width) return;
+
+      const { startX, startStart, startEnd } = dragRef.current;
+      const duration = startEnd - startStart;
+      const dx = e.clientX - startX;
+      if (Math.abs(dx) > 2) dragRef.current.moved = true;
+      const shift = (-dx / width) * duration;
+
+      let newStart = startStart + shift;
+      let newEnd = startEnd + shift;
+
+      const minMs = parseISO(data.minDate).getTime();
+      const maxMs = parseISO(data.maxDate).getTime();
+      if (newStart < minMs) {
+        newStart = minMs;
+        newEnd = minMs + duration;
+      }
+      if (newEnd > maxMs) {
+        newEnd = maxMs;
+        newStart = maxMs - duration;
+      }
+
+      setDateRange({
+        start: format(newStart, "yyyy-MM-dd"),
+        end: format(newEnd, "yyyy-MM-dd"),
+      });
+    };
+
+    const handleUp = () => {
+      if (!dragRef.current.active) return;
+      const moved = dragRef.current.moved;
+      dragRef.current.active = false;
+      dragRef.current.moved = false;
+      setIsPanning(false);
+      if (moved) lastPanAtRef.current = Date.now();
+    };
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [data]);
 
   // Custom Tooltip
   const ExpandedTooltip = ({ active, payload, label }: any) => {
@@ -709,7 +791,17 @@ export default function App() {
               <X className="h-6 w-6" />
             </button>
           </div>
-          <div className="flex-1 p-6 bg-slate-50/30" onWheel={handleWheelZoom}>
+          <div
+            ref={chartWrapRef}
+            onMouseDownCapture={startPan}
+            onPointerDownCapture={startPan}
+            onWheel={handleWheelZoom}
+            className={cn(
+              "flex-1 p-6 bg-slate-50/30 select-none",
+              isPanning ? "cursor-grabbing" : "cursor-grab"
+            )}
+            style={{ touchAction: "none" }}
+          >
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 80 }} onClick={handleChartClick}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
