@@ -87,8 +87,15 @@ def run_daily_job(window_days: int = 30) -> Optional[EngineResult]:
 
 if __name__ == "__main__":
     # CLI 환경에서의 직접 실행 지원
+    import argparse
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
-    run_daily_job()
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--window-days", type=int, default=30, help="Recompute range (days)")
+    args = ap.parse_args()
+
+    run_daily_job(window_days=args.window_days)

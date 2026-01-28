@@ -254,7 +254,11 @@ def notify(result: EngineResult, session: Optional[requests.Session] = None) -> 
         logger.error("DISCORD_WEBHOOK_URL looks invalid (missing http/https). skipping.")
         return False
 
-    content = _truncate(f"[WarRoom] {result.as_of_date} | {result.state} | score={result.score}")
+    content = f"[WarRoom] {result.as_of_date} | {result.state} | score={result.score}"
+    site_url = str(getattr(settings, "discord_site_url", "") or "").strip()
+    if site_url:
+        content = f"{content}\n{site_url}"
+    content = _truncate(content)
     payload = {"content": content, "embeds": [build_embed(result)]}
     client = session or requests.Session()
     ok, status, msg = _post_with_retry(

@@ -236,6 +236,31 @@ def export_asset_universe_csv(conn, out_path: Optional[Path] = None) -> Path:
     pivot = df.pivot_table(index="date", columns="series_id", values="value", aggfunc="last")
     pivot = pivot.sort_index()
 
+    # Normalize FXCM_COPPER -> COPPER (avoid duplicate columns)
+    if "FXCM_COPPER" in pivot.columns:
+        if "COPPER" in pivot.columns:
+            pivot["COPPER"] = pivot["COPPER"].combine_first(pivot["FXCM_COPPER"])
+        else:
+            pivot = pivot.rename(columns={"FXCM_COPPER": "COPPER"})
+        pivot = pivot.drop(columns=["FXCM_COPPER"], errors="ignore")
+
+    # Merge with existing CSV if present (DB values take precedence)
+    try:
+        if out_path.exists():
+            existing = pd.read_csv(out_path)
+            if "date" in existing.columns:
+                existing["date"] = pd.to_datetime(existing["date"], errors="coerce")
+                existing = existing.dropna(subset=["date"]).set_index("date").sort_index()
+                if "FXCM_COPPER" in existing.columns:
+                    if "COPPER" in existing.columns:
+                        existing["COPPER"] = existing["COPPER"].combine_first(existing["FXCM_COPPER"])
+                    else:
+                        existing = existing.rename(columns={"FXCM_COPPER": "COPPER"})
+                    existing = existing.drop(columns=["FXCM_COPPER"], errors="ignore")
+                pivot = pivot.combine_first(existing)
+    except Exception:
+        pass
+
     pivot.to_csv(out_path, encoding="utf-8")
     return out_path
 
