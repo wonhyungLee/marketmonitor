@@ -78,7 +78,7 @@ def _yield_to_bond_index(yield_pct: pd.Series, duration: float, add_carry: bool)
 
 
 ASSET_SERIES_CANDIDATES: Dict[str, Tuple[str, ...]] = {
-    "NASDAQ": ("NASDAQ_DLY_IXIC", "US100", "CAPITALCOM_US100", "NASDAQ"),
+    "NASDAQ": ("NASDAQ_DLY_IXIC", "NASDAQ", "IXIC"),
     "GOLD": ("XAUUSD",),
     "BTC": ("BTCUSD",),
     "USDKRW": ("USDKRW",),

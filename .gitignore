@@ -12,3 +12,10 @@ temp*.txt
 개인정보.txt
 warroom.db*
 data/webhook_records.csv
+
+# Data backups and locks
+data/backups/
+data/.job_lock/
+data/.job_state/
+*.bak
+*.pre_norm

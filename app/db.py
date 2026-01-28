@@ -47,6 +47,33 @@ def init_db(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS portfolio_daily (
+            as_of_date TEXT PRIMARY KEY,
+            portfolio_date TEXT,
+            state TEXT,
+            model TEXT,
+            target_vol_ann REAL,
+            vol_window_days INTEGER,
+            ma_window_days INTEGER,
+            leverage_cap REAL,
+            gross_exposure REAL,
+            cash_weight REAL,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS portfolio_weights (
+            as_of_date TEXT NOT NULL,
+            asset_id TEXT NOT NULL,
+            weight REAL NOT NULL,
+            PRIMARY KEY (as_of_date, asset_id)
+        );
+        """
+    )
     conn.commit()
 
 
@@ -103,6 +130,69 @@ def insert_daily_state(
             created_at,
         ),
     )
+    conn.commit()
+
+
+def upsert_portfolio_daily(
+    conn: sqlite3.Connection,
+    as_of_date: str,
+    portfolio_date: Optional[str],
+    state: str,
+    model: str,
+    target_vol_ann: Optional[float],
+    vol_window_days: Optional[int],
+    ma_window_days: Optional[int],
+    leverage_cap: Optional[float],
+    gross_exposure: Optional[float],
+    cash_weight: Optional[float],
+    created_at: str,
+) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT OR REPLACE INTO portfolio_daily
+        (as_of_date, portfolio_date, state, model, target_vol_ann, vol_window_days, ma_window_days,
+         leverage_cap, gross_exposure, cash_weight, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            as_of_date,
+            portfolio_date,
+            state,
+            model,
+            target_vol_ann,
+            vol_window_days,
+            ma_window_days,
+            leverage_cap,
+            gross_exposure,
+            cash_weight,
+            created_at,
+        ),
+    )
+    conn.commit()
+
+
+def replace_portfolio_weights(
+    conn: sqlite3.Connection,
+    as_of_date: str,
+    weights: Dict[str, float],
+) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        DELETE FROM portfolio_weights WHERE as_of_date = ?;
+        """,
+        (as_of_date,),
+    )
+    if weights:
+        cur.executemany(
+            """
+            INSERT OR REPLACE INTO portfolio_weights
+            (as_of_date, asset_id, weight)
+            VALUES (?, ?, ?);
+            """,
+            [(as_of_date, asset_id, float(weight)) for asset_id, weight in weights.items()],
+        )
     conn.commit()
 
 

@@ -1,6 +1,8 @@
 import logging
 import sqlite3
 import os
+import threading
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Set, Optional
@@ -41,6 +43,8 @@ if DATA_DIR.exists():
 if INDICATOR_DIR.exists():
     app.mount("/지표데이터", StaticFiles(directory=INDICATOR_DIR), name="indicator-data")
 
+_scheduler_started = False
+
 
 def _get_trigger_ids() -> Set[str]:
     """대소문자 무시를 위해 모든 트리거 ID를 대문자로 정규화하여 반환"""
@@ -67,11 +71,50 @@ def startup() -> None:
     with db.db_session(settings.db_path) as conn:
         db.init_db(conn)
     logger.info("WarRoom v2.1 Engine Online. Database ready.")
+    _start_periodic_daily_job()
 
 
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "version": "2.1"}
+
+
+def _start_periodic_daily_job() -> None:
+    global _scheduler_started
+    if _scheduler_started:
+        return
+    if not getattr(settings, "auto_refresh_daily", False):
+        logger.info("Periodic daily job disabled (AUTO_REFRESH_DAILY=false)")
+        return
+
+    try:
+        interval = int(getattr(settings, "auto_refresh_daily_interval_sec", 10800))
+    except Exception:
+        interval = 10800
+    if interval < 60:
+        interval = 60
+
+    try:
+        window_days = int(getattr(settings, "auto_refresh_window_days", 7))
+    except Exception:
+        window_days = 7
+
+    def _loop() -> None:
+        logger.info(
+            "Periodic daily job thread started. interval=%ss window_days=%s",
+            interval,
+            window_days,
+        )
+        while True:
+            try:
+                run_daily_job(window_days=window_days, force=True, trigger="timer")
+            except Exception:
+                logger.exception("Periodic daily job failed")
+            time.sleep(interval)
+
+    thread = threading.Thread(target=_loop, name="warroom-daily-loop", daemon=True)
+    thread.start()
+    _scheduler_started = True
 
 
 @app.post("/order")
@@ -81,7 +124,7 @@ async def ingest(request: Request, background_tasks: BackgroundTasks, webhook_to
     웹훅 통합 수신 엔드포인트.
     수신 -> 즉시 저장 -> 비동기 계산(BackgroundTasks) 순으로 안전하게 처리합니다.
     """
-    if webhook_token is not None and webhook_token != settings.webhook_token:
+    if webhook_token is not None and settings.webhook_token and webhook_token != settings.webhook_token:
         raise HTTPException(status_code=401, detail="invalid webhook token")
 
     raw_body = await request.body()
@@ -113,7 +156,7 @@ async def ingest(request: Request, background_tasks: BackgroundTasks, webhook_to
     trigger_set = _get_trigger_ids()
 
     # 키워드 매칭 및 명시적 리스트 매칭 결합
-    if not getattr(settings, "auto_refresh_daily", True):
+    if not getattr(settings, "auto_refresh_on_webhook", False):
         is_trigger = False
     elif not trigger_set:
         is_trigger = True
@@ -123,7 +166,14 @@ async def ingest(request: Request, background_tasks: BackgroundTasks, webhook_to
     if is_trigger:
         # 3. 비동기 작업 지시 (서버 응답은 즉시 반환)
         logger.info(f"Triggering background update for series: {input_id}")
-        background_tasks.add_task(run_daily_job)
+        window_days = int(getattr(settings, "auto_refresh_window_days", 7) or 7)
+        min_interval_sec = int(getattr(settings, "auto_refresh_daily_min_interval_sec", 0) or 0)
+        background_tasks.add_task(
+            run_daily_job,
+            window_days=window_days,
+            min_interval_sec=min_interval_sec if min_interval_sec > 0 else None,
+            trigger="webhook",
+        )
     else:
         logger.info(f"Ingested {input_id}, but not a trigger. Skipping background job.")
 

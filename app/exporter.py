@@ -1,5 +1,6 @@
 import csv
 import json
+import shutil
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -31,6 +32,19 @@ CSV_HEADER = [
     "UMCSENT_low",
     "triggers",
 ]
+
+
+def backup_daily_states_csv(backup_dir: Optional[Path] = None) -> Optional[Path]:
+    base_dir = Path(__file__).resolve().parent.parent
+    src = base_dir / "data" / "market_states_daily.csv"
+    if not src.exists():
+        return None
+    backup_dir = backup_dir or (base_dir / "data" / "backups")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    dst = backup_dir / f"market_states_daily_{ts}.csv"
+    shutil.copy2(src, dst)
+    return dst
 
 
 def _parse_json(raw: Optional[str]) -> Dict[str, Any]:
@@ -204,7 +218,48 @@ def export_series_csv(
 
 
 def export_nasdaq_1d_csv(conn, out_path: Optional[Path] = None) -> Path:
-    return export_series_csv(conn, "NASDAQ_DLY_IXIC", "1D", out_path=out_path, value_column="close")
+    base_dir = Path(__file__).resolve().parent.parent
+    out_path = out_path or (base_dir / "data" / "nasdaq_dly_ixic_1d.csv")
+
+    rows = conn.execute(
+        """
+        SELECT time_utc_ms, value
+        FROM market_observations
+        WHERE series_id = ? AND interval = ?
+        ORDER BY time_utc_ms ASC
+        """,
+        ("NASDAQ_DLY_IXIC", "1D"),
+    ).fetchall()
+
+    by_date: Dict[str, float] = {}
+    for time_utc_ms, value in rows:
+        if time_utc_ms is None:
+            continue
+        date_str = datetime.fromtimestamp(time_utc_ms / 1000, tz=timezone.utc).date().isoformat()
+        by_date[date_str] = value
+
+    # Emit rows for daily_states dates even if NASDAQ is missing (blank close).
+    dates = None
+    try:
+        state_rows = conn.execute(
+            "SELECT as_of_date FROM daily_states ORDER BY as_of_date ASC"
+        ).fetchall()
+        dates = [d for (d,) in state_rows if d]
+    except Exception:
+        dates = None
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["time", "close"])
+        if dates:
+            for date_str in dates:
+                writer.writerow([date_str, by_date.get(date_str, "")])
+        else:
+            for date_str in sorted(by_date.keys()):
+                writer.writerow([date_str, by_date[date_str]])
+
+    return out_path
 
 
 def export_asset_universe_csv(conn, out_path: Optional[Path] = None) -> Path:

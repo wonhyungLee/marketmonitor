@@ -17,7 +17,7 @@ export interface PortfolioRow {
 
 export interface NasdaqRow {
   date: string;
-  close: number;
+  close: number | null;
 }
 
 export interface DashboardData {

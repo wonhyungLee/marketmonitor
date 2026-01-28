@@ -67,8 +67,13 @@ export function useWarRoomData() {
       if (csvNasdaq.status === "fulfilled") {
         const parsed = Papa.parse(csvNasdaq.value, { header: true, skipEmptyLines: true });
         nasdaq = parsed.data
-          .map((r: any) => ({ date: r.time, close: parseFloat(r.close) }))
-          .filter((r) => r.date && !isNaN(r.close))
+          .map((r: any) => {
+            const rawClose = r.close;
+            const close = rawClose === "" || rawClose === null || rawClose === undefined ? null : parseFloat(rawClose);
+            const cleanClose = typeof close === "number" && Number.isFinite(close) ? close : null;
+            return { date: r.time, close: cleanClose };
+          })
+          .filter((r) => r.date)
           .sort((a, b) => (a.date < b.date ? -1 : 1));
       }
 

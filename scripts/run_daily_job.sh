@@ -6,4 +6,4 @@ ROOT="/home/dldnjsrk/remote-ubuntu/시장감지모델"
 cd "$ROOT"
 export PYTHONPATH="$ROOT"
 
-"$ROOT/.venv/bin/python" "$ROOT/scripts/run_daily.py"
+"$ROOT/.venv/bin/python" "$ROOT/scripts/run_daily.py" --window-days 7

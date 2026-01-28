@@ -8,8 +8,8 @@ from pydantic import BaseModel, field_validator, model_validator
 SERIES_ID_ALIASES = {
     "IXIC": "NASDAQ_DLY_IXIC",
     "NASDAQ": "NASDAQ_DLY_IXIC",
-    "US100": "NASDAQ_DLY_IXIC",
-    "CAPITALCOM_US100": "NASDAQ_DLY_IXIC",
+    "NASDAQ_IXIC": "NASDAQ_DLY_IXIC",
+    "CAPITALCOM_US100": "US100",
     "FXCM_COPPER": "COPPER",
 }
 
@@ -111,9 +111,13 @@ class TradingViewPayload(BaseModel):
         raw = v.strip().upper() # Always work with uppercase
         if not raw:
             return v
+        alias_key = re.sub(r"[^A-Z0-9]+", "_", raw).strip("_")
         # Map aliases (e.g., IXIC -> NASDAQ_DLY_IXIC)
-        mapped = SERIES_ID_ALIASES.get(raw)
-        return mapped or raw # Returns canonical name in uppercase
+        mapped = SERIES_ID_ALIASES.get(alias_key) or SERIES_ID_ALIASES.get(raw)
+        if mapped:
+            return mapped
+        # Default to normalized alias_key (e.g., NASDAQ:DLY:IXIC -> NASDAQ_DLY_IXIC)
+        return alias_key or raw # Returns canonical name in uppercase
 
     @field_validator("value")
     def normalize_value(cls, v: Union[int, float, str]) -> float:

@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     host: str = Field("0.0.0.0", env="HOST")
     port: int = Field(8000, env="PORT")
-    webhook_token: str = Field(..., env="WEBHOOK_TOKEN")
+    webhook_token: str = Field("", env="WEBHOOK_TOKEN")
     db_path: str = Field("./warroom.db", env="DB_PATH")
     discord_webhook_url: str = Field("", env="DISCORD_WEBHOOK_URL")
     discord_site_url: str = Field("https://wongram.shop/site2", env="DISCORD_SITE_URL")
@@ -44,7 +44,10 @@ class Settings(BaseSettings):
     auto_refresh_min_interval_sec: int = Field(30, env="AUTO_REFRESH_MIN_INTERVAL_SEC")
     auto_refresh_daily: bool = Field(True, env="AUTO_REFRESH_DAILY")
     auto_refresh_daily_min_interval_sec: int = Field(30, env="AUTO_REFRESH_DAILY_MIN_INTERVAL_SEC")
+    auto_refresh_daily_interval_sec: int = Field(10800, env="AUTO_REFRESH_DAILY_INTERVAL_SEC")
+    auto_refresh_window_days: int = Field(7, env="AUTO_REFRESH_WINDOW_DAYS")
     auto_refresh_trigger_series: str = Field("", env="AUTO_REFRESH_TRIGGER_SERIES")
+    auto_refresh_on_webhook: bool = Field(True, env="AUTO_REFRESH_ON_WEBHOOK")
 
     # Allocation model
     # - fixed: use EQUITY_WEIGHT_* table (macro state + trend buckets)

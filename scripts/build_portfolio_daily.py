@@ -39,7 +39,7 @@ def _asset_col(df: pd.DataFrame, prefix: str) -> Optional[str]:
 
 
 ASSET_SERIES_CANDIDATES: Dict[str, Tuple[str, ...]] = {
-    "NASDAQ": ("NASDAQ_DLY_IXIC", "US100", "CAPITALCOM_US100", "NASDAQ"),
+    "NASDAQ": ("NASDAQ_DLY_IXIC", "NASDAQ", "IXIC"),
     "GOLD": ("XAUUSD",),
     "BTC": ("BTCUSD",),
     "USDKRW": ("USDKRW",),

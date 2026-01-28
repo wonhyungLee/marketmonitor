@@ -290,7 +290,7 @@ export default function App() {
     rows = rows.filter(r => enabledStates.has(r.state));
 
     if (onlyTradingDays && period === "day") {
-      const tradingDays = new Set(data?.nasdaq.map(n => n.date));
+      const tradingDays = new Set(data?.nasdaq.filter(n => n.close !== null).map(n => n.date));
       rows = rows.filter(r => tradingDays.has(r.date));
     }
 
@@ -665,7 +665,7 @@ export default function App() {
                                 <div className="font-mono text-lg font-bold text-slate-900">
                                    {(() => {
                                       const n = data?.nasdaq.find(x => x.date === lastSelectedDate);
-                                      return n ? n.close.toFixed(2) : "—";
+                                      return n && n.close !== null ? n.close.toFixed(2) : "—";
                                    })()}
                                 </div>
                               </div>
