@@ -4,10 +4,13 @@ import shutil
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+import pandas as pd
 
 from zoneinfo import ZoneInfo
 
 from app.portfolio import load_asset_universe, recommend_portfolio_from_px
+from app.cycles import build_cycles_from_nasdaq_daily
+from app.fear_euphoria import build_fear_euphoria_from_cycles_monthly, compute_daily_triggers
 from app.settings import get_settings
 
 CSV_HEADER = [
@@ -260,6 +263,322 @@ def export_nasdaq_1d_csv(conn, out_path: Optional[Path] = None) -> Path:
                 writer.writerow([date_str, by_date[date_str]])
 
     return out_path
+
+
+def export_cycles_csv(conn, out_dir: Optional[Path] = None) -> tuple[Optional[Path], Optional[Path]]:
+    """Export NASDAQ cycle indicators.
+
+    Emits two files into ./data (or out_dir):
+      - cycles_monthly.csv: long-run cycle features on monthly data
+      - cycles_daily.csv: daily forward-filled snapshot used by portfolio scaling
+
+    Returns: (monthly_path, daily_path)
+    """
+    base_dir = Path(__file__).resolve().parent.parent
+    out_dir = out_dir or (base_dir / "data")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_m = out_dir / "cycles_monthly.csv"
+    out_d = out_dir / "cycles_daily.csv"
+
+    # Pull NASDAQ daily closes.
+    rows = conn.execute(
+        """
+        SELECT time_utc_ms, value
+        FROM market_observations
+        WHERE series_id = ? AND interval = ?
+        ORDER BY time_utc_ms ASC
+        """,
+        ("NASDAQ_DLY_IXIC", "1D"),
+    ).fetchall()
+    if not rows:
+        return None, None
+
+    # Keep last close per UTC date.
+    by_date: Dict[str, float] = {}
+    for time_utc_ms, value in rows:
+        if time_utc_ms is None:
+            continue
+        date_str = datetime.fromtimestamp(time_utc_ms / 1000, tz=timezone.utc).date().isoformat()
+        by_date[date_str] = value
+
+    daily = pd.Series(by_date).sort_index()
+    daily.index = pd.to_datetime(daily.index)
+    daily = pd.to_numeric(daily, errors="coerce").dropna()
+    if daily.empty:
+        return None, None
+
+    cycles_m = build_cycles_from_nasdaq_daily(daily)
+    if cycles_m.empty:
+        return None, None
+
+    # Write monthly
+    cycles_m_out = cycles_m.copy()
+    cycles_m_out.index.name = "time"
+    cycles_m_out.reset_index().to_csv(out_m, index=False, encoding="utf-8")
+
+    # Forward-fill monthly snapshot to daily dates.
+    daily_dates = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+    snap = cycles_m[[
+        "risk_multiplier",
+        "price_cycle_z",
+        "vol_z",
+        "wave_7y",
+        "wave_7y_phase",
+        "vol_wave_10y",
+        "vol_wave_10y_phase",
+    ]].copy()
+    snap.index = snap.index.to_period("M").to_timestamp("M")
+    snap_d = snap.reindex(pd.to_datetime(daily_dates).to_period("M").to_timestamp("M"))
+    snap_d.index = pd.to_datetime(daily_dates)
+    snap_d = snap_d.ffill()
+    snap_d = snap_d.reset_index().rename(columns={"index": "date"})
+    snap_d.to_csv(out_d, index=False, encoding="utf-8")
+
+    return out_m, out_d
+
+
+def export_fear_euphoria_csv(conn, out_dir: Optional[Path] = None) -> tuple[Optional[Path], Optional[Path]]:
+    """Export fear/euphoria forecast windows + confirm triggers.
+
+    Emits two files into ./data (or out_dir):
+      - fear_euphoria_monthly.csv: phase->months-ahead forecast + confidence
+      - fear_euphoria_daily.csv: daily forward-filled + confirm trigger flags
+
+    Returns: (monthly_path, daily_path)
+    """
+    base_dir = Path(__file__).resolve().parent.parent
+    out_dir = out_dir or (base_dir / "data")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cycles_m_path = out_dir / "cycles_monthly.csv"
+    cycles_d_path = out_dir / "cycles_daily.csv"
+    out_m = out_dir / "fear_euphoria_monthly.csv"
+    out_d = out_dir / "fear_euphoria_daily.csv"
+
+    # Need cycles_monthly (for phase/amp). If missing, try to create it.
+    if not cycles_m_path.exists() or not cycles_d_path.exists():
+        export_cycles_csv(conn, out_dir=out_dir)
+    if not cycles_m_path.exists():
+        return None, None
+
+    try:
+        cycles_m = pd.read_csv(cycles_m_path)
+    except Exception:
+        return None, None
+    if cycles_m.empty:
+        return None, None
+
+    fe_m = build_fear_euphoria_from_cycles_monthly(cycles_m)
+    if fe_m.empty:
+        return None, None
+    fe_m.to_csv(out_m, index=False, encoding="utf-8")
+
+    # Forward-fill monthly features to daily range.
+    # Use NASDAQ daily close range (DB) as the daily index, then merge triggers.
+    rows = conn.execute(
+        """
+        SELECT time_utc_ms, value
+        FROM market_observations
+        WHERE series_id = ? AND interval = ?
+        ORDER BY time_utc_ms ASC
+        """,
+        ("NASDAQ_DLY_IXIC", "1D"),
+    ).fetchall()
+    if not rows:
+        return out_m, None
+
+    by_date: Dict[str, float] = {}
+    for time_utc_ms, value in rows:
+        if time_utc_ms is None:
+            continue
+        date_str = datetime.fromtimestamp(time_utc_ms / 1000, tz=timezone.utc).date().isoformat()
+        by_date[date_str] = value
+
+    daily_close = pd.Series(by_date).sort_index()
+    daily_close.index = pd.to_datetime(daily_close.index)
+    daily_close = pd.to_numeric(daily_close, errors="coerce").dropna()
+    if daily_close.empty:
+        return out_m, None
+
+    # Use observed dates (trading days). This avoids weekend forward-fill artifacts in returns/vol.
+    daily_dates = pd.DatetimeIndex(daily_close.index).sort_values()
+
+    fe_m2 = fe_m.copy()
+    fe_m2["time"] = pd.to_datetime(fe_m2["time"], errors="coerce")
+    fe_m2 = fe_m2.dropna(subset=["time"]).sort_values("time")
+    fe_m2 = fe_m2.set_index(fe_m2["time"].dt.to_period("M").dt.to_timestamp("M")).drop(columns=["time"])
+
+    fe_d = fe_m2.reindex(pd.to_datetime(daily_dates).to_period("M").to_timestamp("M"))
+    fe_d.index = pd.to_datetime(daily_dates)
+    fe_d = fe_d.ffill()
+    fe_d.index.name = "time"
+
+    # Daily macro state (DEFCON1/2) for confirm trigger.
+    state_rows = conn.execute(
+        """
+        SELECT as_of_date, state
+        FROM daily_states
+        ORDER BY as_of_date ASC
+        """
+    ).fetchall()
+    st = pd.Series({r[0]: r[1] for r in state_rows})
+    st.index = pd.to_datetime(st.index, errors="coerce")
+
+    trig = compute_daily_triggers(
+        daily_close=daily_close,
+        daily_state=st,
+        forecast_daily=fe_d,
+    )
+
+    merged = pd.concat([fe_d, trig], axis=1)
+    merged = merged.reset_index().rename(columns={"index": "date"})
+    merged.to_csv(out_d, index=False, encoding="utf-8")
+
+    return out_m, out_d
+
+
+
+def export_fear_euphoria_calendar(conn, out_dir: Optional[Path] = None, *, horizon_months: int = 60, lookback_months: int = 12) -> tuple[Optional[Path], Optional[Path]]:
+    """Export a month-level 'calendar' view for fear/euphoria windows.
+
+    Generates:
+      - fear_euphoria_calendar.csv: month_end rows with window flags (24/36m)
+      - fear_euphoria_forecast.ics: iCal events for window starts + predicted peak/trough
+
+    The calendar is anchored to the *latest* monthly forecast row.
+
+    Returns: (csv_path, ics_path)
+    """
+    base_dir = Path(__file__).resolve().parent.parent
+    out_dir = out_dir or (base_dir / "data")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fe_m_path = out_dir / "fear_euphoria_monthly.csv"
+    cal_csv = out_dir / "fear_euphoria_calendar.csv"
+    cal_ics = out_dir / "fear_euphoria_forecast.ics"
+
+    if not fe_m_path.exists():
+        # attempt to create
+        export_fear_euphoria_csv(conn, out_dir=out_dir)
+    if not fe_m_path.exists():
+        return None, None
+
+    try:
+        fe_m = pd.read_csv(fe_m_path)
+    except Exception:
+        return None, None
+    if fe_m.empty:
+        return None, None
+
+    fe_m["time"] = pd.to_datetime(fe_m.get("time"), errors="coerce")
+    fe_m = fe_m.dropna(subset=["time"]).sort_values("time")
+    if fe_m.empty:
+        return None, None
+
+    last = fe_m.iloc[-1]
+    as_of = pd.Timestamp(last["time"]).to_period("M").to_timestamp("M")
+
+    def _to_float(v):
+        try:
+            return float(v)
+        except Exception:
+            return None
+
+    mu_f = _to_float(last.get("months_until_fear"))
+    mu_e = _to_float(last.get("months_until_euphoria"))
+
+    # Predicted peak/trough month (month-end) from latest estimate.
+    peak_f = as_of + pd.DateOffset(months=int(round(mu_f))) if mu_f is not None and mu_f >= 0 else None
+    trough_e = as_of + pd.DateOffset(months=int(round(mu_e))) if mu_e is not None and mu_e >= 0 else None
+
+    fear36_start = peak_f - pd.DateOffset(months=36) if peak_f is not None else None
+    fear24_start = peak_f - pd.DateOffset(months=24) if peak_f is not None else None
+    euph36_start = trough_e - pd.DateOffset(months=36) if trough_e is not None else None
+    euph24_start = trough_e - pd.DateOffset(months=24) if trough_e is not None else None
+
+    start = as_of - pd.DateOffset(months=int(lookback_months))
+    end = as_of + pd.DateOffset(months=int(horizon_months))
+    months = pd.period_range(start=start.to_period("M"), end=end.to_period("M"), freq="M").to_timestamp("M")
+
+    def _in_range(ts, a, b):
+        if ts is None or a is None or b is None:
+            return False
+        return (ts >= a) and (ts <= b)
+
+    rows = []
+    for ts in months:
+        f36 = int(_in_range(ts, fear36_start, peak_f)) if peak_f is not None else 0
+        f24 = int(_in_range(ts, fear24_start, peak_f)) if peak_f is not None else 0
+        e36 = int(_in_range(ts, euph36_start, trough_e)) if trough_e is not None else 0
+        e24 = int(_in_range(ts, euph24_start, trough_e)) if trough_e is not None else 0
+
+        label = []
+        if f36:
+            label.append("FEAR")
+        if e36:
+            label.append("EUPH")
+        label = "+".join(label) if label else "NONE"
+
+        rows.append(
+            {
+                "month_end": ts.date().isoformat(),
+                "as_of_month_end": as_of.date().isoformat(),
+                "fear_peak_month_end": peak_f.date().isoformat() if peak_f is not None else "",
+                "euphoria_trough_month_end": trough_e.date().isoformat() if trough_e is not None else "",
+                "fear_window_36m": f36,
+                "fear_window_24m": f24,
+                "euphoria_window_36m": e36,
+                "euphoria_window_24m": e24,
+                "label": label,
+            }
+        )
+
+    pd.DataFrame(rows).to_csv(cal_csv, index=False, encoding="utf-8")
+
+    # iCal (ICS): simple all-day events at month-start with 1-day duration
+    def _ics_date(ts: pd.Timestamp) -> str:
+        return ts.strftime("%Y%m%d")
+
+    def _vevent(uid: str, summary: str, dt: pd.Timestamp, desc: str = "") -> str:
+        # DTSTART/DTEND as all-day (date)
+        d0 = _ics_date(dt.to_period("M").to_timestamp("D"))
+        d1 = _ics_date((dt.to_period("M").to_timestamp("D") + pd.Timedelta(days=1)))
+        out = [
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTART;VALUE=DATE:{d0}",
+            f"DTEND;VALUE=DATE:{d1}",
+            f"SUMMARY:{summary}",
+        ]
+        if desc:
+            out.append(f"DESCRIPTION:{desc}")
+        out.append("END:VEVENT")
+        return "\n".join(out)
+
+    vevents = []
+    if fear36_start is not None:
+        vevents.append(_vevent("fear-window36-start@marketmonitor", "FEAR window start (36m)", fear36_start, "Cycle-based forecast window begins"))
+    if fear24_start is not None:
+        vevents.append(_vevent("fear-window24-start@marketmonitor", "FEAR window start (24m)", fear24_start, "Closer approach to FEAR peak"))
+    if peak_f is not None:
+        vevents.append(_vevent("fear-peak@marketmonitor", "FEAR peak (cycle forecast)", peak_f, "Predicted volatility cycle peak"))
+
+    if euph36_start is not None:
+        vevents.append(_vevent("euph-window36-start@marketmonitor", "EUPH window start (36m)", euph36_start, "Cycle-based forecast window begins"))
+    if euph24_start is not None:
+        vevents.append(_vevent("euph-window24-start@marketmonitor", "EUPH window start (24m)", euph24_start, "Closer approach to EUPH trough"))
+    if trough_e is not None:
+        vevents.append(_vevent("euph-trough@marketmonitor", "EUPH trough (cycle forecast)", trough_e, "Predicted volatility cycle trough"))
+
+    ics = "\n".join([
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//MarketMonitor//FearEuphoria//EN",
+        *vevents,
+        "END:VCALENDAR",
+        "",
+    ])
+    cal_ics.write_text(ics, encoding="utf-8")
+
+    return cal_csv, cal_ics
 
 
 def export_asset_universe_csv(conn, out_path: Optional[Path] = None) -> Path:

@@ -28,6 +28,43 @@ Notes:
 python scripts/build_portfolio_daily.py
 ```
 
+## Cycle Indicators (NASDAQ price/volatility)
+
+The daily job can export NASDAQ cycle features to:
+- `data/cycles_monthly.csv` (monthly features)
+- `data/cycles_daily.csv` (daily forward-filled snapshot)
+
+If enabled, the multi-asset portfolio engine will scale **risk assets** by the exported
+`risk_multiplier` (0.60 ~ 1.15-ish) before applying leverage caps:
+
+- Enable: `PORTFOLIO_USE_CYCLES=true`
+- CSV name: `PORTFOLIO_CYCLES_CSV_NAME=cycles_daily.csv`
+
+These are *risk/phase context indicators*, not point forecasts.
+
+## Fear / Euphoria Program (Cycle forecast + confirm triggers)
+
+The daily job also exports a "fear / euphoria" signal built on top of the long-run volatility cycle:
+
+- `data/fear_euphoria_monthly.csv` (forecast: months-until FEAR/EUPH + confidence)
+- `data/fear_euphoria_daily.csv` (daily snapshot + confirm trigger flags + severity levels)
+- `data/fear_euphoria_calendar.csv` (month-level calendar view of forecast windows, anchored to latest forecast)
+- `data/fear_euphoria_forecast.ics` (iCal events for window starts + predicted peak/trough)
+
+Design:
+
+1) **Forecast window**: "Is FEAR/EUPH likely within the next 24–36 months?" (cycle-based)
+2) **Confirm trigger** (only fires inside the window):
+   - FEAR trigger = volatility spike + trend break + DEFCON1/2
+   - EUPH trigger = volatility very low + overextension + momentum slowdown
+
+Portfolio overlay:
+
+- When FEAR trigger is ON, the portfolio engine reduces risk using tiered defense levels (L1/L2/L3):
+  - caps leverage
+  - scales risk assets
+  See `.env.example`: `PORTFOLIO_USE_FEAR_EUPHORIA`, `PORTFOLIO_FEAR_L*_LEVERAGE_CAP`, `PORTFOLIO_FEAR_L*_RISK_MULTIPLIER`.
+
 ## View As A Site (Table + Charts)
 
 ```powershell

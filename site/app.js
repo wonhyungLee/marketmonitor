@@ -11,6 +11,9 @@ const DEFAULT_PATHS = {
   nasdaq1d: "../data/nasdaq_dly_ixic_1d.csv",
   states: "../data/market_states_daily.csv",
   portfolio: "../data/portfolio_daily.csv",
+  fear: "../data/fear_euphoria_daily.csv",
+  fearCal: "../data/fear_euphoria_calendar.csv",
+  cyclesDaily: "../data/cycles_daily.csv",
 };
 
 const PAGE_SIZE = 200;
@@ -245,6 +248,21 @@ function buildMainOption(state, startDate, endDate, enabledStates) {
           port && port.cash !== null && port.cash !== undefined ? `${fmtNum(port.cash * 100.0, 1)}%` : "—";
         const portText = port && port.topText ? String(port.topText) : "—";
         const equityText = equity === null || equity === undefined ? "—" : `${fmtNum(equity * 100.0, 1)}%`;
+        const fe = state.fearByDate ? state.fearByDate.get(d) : null;
+        const feLines = [];
+        if (fe) {
+          const muF = fe.muFear === null || fe.muFear === undefined ? "—" : `${fmtNum(fe.muFear, 1)}m`;
+          const muE = fe.muEuph === null || fe.muEuph === undefined ? "—" : `${fmtNum(fe.muEuph, 1)}m`;
+          const confText = fe.conf === null || fe.conf === undefined ? "—" : `${fmtNum(fe.conf * 100.0, 0)}%`;
+          const fTrig = fe.fearTrig ? "ON" : "off";
+          const eTrig = fe.euphTrig ? "ON" : "off";
+          const fLvl = Number(fe.fearLvl || 0);
+          const eLvl = Number(fe.euphLvl || 0);
+          feLines.push(`<div style="margin-top:6px;"><b>Fear/Euph</b></div>`);
+          feLines.push(`<div>FEAR ETA: <b>${muF}</b> (level: <b>L${fLvl}</b>, trigger: <b>${fTrig}</b>)</div>`);
+          feLines.push(`<div>EUPH ETA: <b>${muE}</b> (level: <b>L${eLvl}</b>, trigger: <b>${eTrig}</b>)</div>`);
+          feLines.push(`<div>Confidence: <b>${confText}</b></div>`);
+        }
         return [
           `<div style="font-weight:700;margin-bottom:6px;">${d}</div>`,
           `<div>NASDAQ: <b>${fmtNum(close, 2)}</b></div>`,
@@ -255,6 +273,7 @@ function buildMainOption(state, startDate, endDate, enabledStates) {
           `<div>Action: <b>${action || "—"}</b></div>`,
           `<div>Gross: <b>${grossText}</b> / Cash: <b>${cashText}</b></div>`,
           `<div>Portfolio: <b>${portText}</b></div>`,
+          ...feLines,
         ].join("");
       },
     },
@@ -493,7 +512,19 @@ function buildFilteredRows(state, startDate, endDate, enabledStates) {
     const close = state.closeByDate.get(r.date);
     if (onlyTradingDays && close === undefined) continue;
 
-    const triggers = r.triggers || "";
+    let triggers = r.triggers || "";
+    const fe = state.fearByDate ? state.fearByDate.get(r.date) : null;
+    if (fe) {
+      const muF = fe.muFear === null || fe.muFear === undefined ? "—" : `${fmtNum(fe.muFear, 1)}m`;
+      const muE = fe.muEuph === null || fe.muEuph === undefined ? "—" : `${fmtNum(fe.muEuph, 1)}m`;
+      const confText = fe.conf === null || fe.conf === undefined ? "—" : `${fmtNum(fe.conf * 100.0, 0)}%`;
+      const tag = [];
+      if (fe.fearTrig) tag.push("FEAR!");
+      if (fe.euphTrig) tag.push("EUPH!");
+      if (!tag.length) tag.push(`FEAR ${muF}`, `EUPH ${muE}`, `C ${confText}`);
+      const addon = tag.join(" ");
+      triggers = triggers ? `${triggers} | ${addon}` : addon;
+    }
     if (q && !triggers.toLowerCase().includes(q)) continue;
 
     const port = state.portfolioByDate ? state.portfolioByDate.get(r.date) : null;
@@ -639,6 +670,254 @@ function renderPortfolioPanel(state, dateStr) {
   }
 }
 
+function renderFearCalendar(state) {
+  const el = state.ui?.fearCalendar;
+  const metaEl = state.ui?.fearCalendarMeta;
+  if (!el) return;
+  const rows = state.fearCalRows || [];
+  if (!rows.length) {
+    el.innerHTML = '<div class="muted">No fear/euphoria calendar data. (Missing data/fear_euphoria_calendar.csv)</div>';
+    if (metaEl) metaEl.textContent = '';
+    return;
+  }
+
+  // Show next 48 months starting from the latest as-of month.
+  let asOf = rows[rows.length - 1].asOf || '';
+  // Some rows repeat asOf; find the first non-empty.
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i].asOf) { asOf = rows[i].asOf; break; }
+  }
+  const start = asOf || rows[0].month;
+  const startP = start.slice(0, 7);
+
+  const pick = rows.filter(r => r.month.slice(0,7) >= startP).slice(0, 48);
+  const grid = document.createElement('div');
+  grid.className = 'calendar-grid';
+
+  for (const r of pick) {
+    const cell = document.createElement('div');
+    const tagFear = r.f36;
+    const tagE = r.e36;
+    cell.className = 'cal-cell' + (tagFear && tagE ? ' both' : '');
+
+    const m = r.month.slice(0,7);
+    const title = document.createElement('div');
+    title.className = 'm';
+    title.textContent = m;
+    cell.appendChild(title);
+
+    const badge = document.createElement('span');
+    badge.className = 'tag ' + (tagFear && tagE ? 'none' : (tagFear ? 'fear' : (tagE ? 'euph' : 'none')));
+    badge.textContent = tagFear && tagE ? 'FEAR+EUPH' : (tagFear ? 'FEAR' : (tagE ? 'EUPH' : 'NONE'));
+    cell.appendChild(badge);
+
+    grid.appendChild(cell);
+  }
+
+  el.innerHTML = '';
+  el.appendChild(grid);
+
+  const last = rows[rows.length - 1];
+  const parts = [];
+  if (last.asOf) parts.push(`as-of ${last.asOf.slice(0,7)}`);
+  if (last.fearPeak) parts.push(`fear peak ~${last.fearPeak.slice(0,7)}`);
+  if (last.euphTrough) parts.push(`euph trough ~${last.euphTrough.slice(0,7)}`);
+  if (metaEl) metaEl.textContent = parts.join(' · ');
+}
+
+function _rangesFromFlag(points, flagFn) {
+  const ranges = [];
+  let open = null;
+  for (const p of points) {
+    const on = !!flagFn(p);
+    if (on && open === null) {
+      open = p.ms;
+    } else if (!on && open !== null) {
+      ranges.push([open, p.ms]);
+      open = null;
+    }
+  }
+  if (open !== null && points.length) {
+    ranges.push([open, points[points.length - 1].ms]);
+  }
+  return ranges;
+}
+
+function buildCyclesSignalsOption(state, startDate, endDate) {
+  const pts = (state.cyclesPoints || []).filter((p) => p.date >= startDate && p.date <= endDate);
+  const wave = pts.map((p) => [p.ms, p.wave7y]);
+  const volWave = pts.map((p) => [p.ms, p.volWave10y]);
+  const risk = pts.map((p) => [p.ms, p.risk]);
+
+  // Shade confirm triggers (if fear/euphoria data is present).
+  let markAreas = [];
+  if (state.fearByDate && state.fearByDate.size) {
+    const fRanges = _rangesFromFlag(pts, (p) => {
+      const fe = state.fearByDate.get(p.date);
+      return fe && fe.fearLvl > 0;
+    });
+    const eRanges = _rangesFromFlag(pts, (p) => {
+      const fe = state.fearByDate.get(p.date);
+      return fe && fe.euphLvl > 0;
+    });
+    markAreas = [
+      ...fRanges.map(([s, e]) => [
+        { xAxis: s, itemStyle: { color: "rgba(231, 76, 60, 0.10)" } },
+        { xAxis: e },
+      ]),
+      ...eRanges.map(([s, e]) => [
+        { xAxis: s, itemStyle: { color: "rgba(46, 204, 113, 0.10)" } },
+        { xAxis: e },
+      ]),
+    ];
+  }
+
+  return {
+    animation: false,
+    grid: { left: 48, right: 54, top: 36, bottom: 42 },
+    tooltip: { trigger: "axis" },
+    legend: { top: 6 },
+    xAxis: { type: "time" },
+    yAxis: [
+      { type: "value", name: "Wave", scale: true },
+      { type: "value", name: "Risk", scale: true },
+    ],
+    dataZoom: [
+      { type: "inside", xAxisIndex: 0 },
+      { type: "slider", xAxisIndex: 0, height: 18, bottom: 8 },
+    ],
+    series: [
+      {
+        name: "Price wave (5–9y)",
+        type: "line",
+        showSymbol: false,
+        data: wave,
+        markArea: markAreas.length ? { silent: true, data: markAreas } : undefined,
+      },
+      {
+        name: "Vol wave (8–14y)",
+        type: "line",
+        showSymbol: false,
+        data: volWave,
+      },
+      {
+        name: "Risk multiplier",
+        type: "line",
+        showSymbol: false,
+        yAxisIndex: 1,
+        data: risk,
+      },
+    ],
+  };
+}
+
+function buildCyclesPhasesOption(state, startDate, endDate) {
+  const pts = (state.cyclesPoints || []).filter((p) => p.date >= startDate && p.date <= endDate);
+  const phPrice = pts.map((p) => [p.ms, p.wave7yPhase]);
+  const phVol = pts.map((p) => [p.ms, p.volWave10yPhase]);
+
+  // Highlight phase neighborhoods: FEAR (~0) and EUPHORIA (~pi/-pi)
+  const tol = Math.PI / 10; // ~18 deg
+  const fearRanges = _rangesFromFlag(pts, (p) => {
+    if (p.volWave10yPhase === null || p.volWave10yPhase === undefined) return false;
+    return Math.abs(p.volWave10yPhase) <= tol;
+  });
+  const euphRanges = _rangesFromFlag(pts, (p) => {
+    if (p.volWave10yPhase === null || p.volWave10yPhase === undefined) return false;
+    return Math.abs(Math.abs(p.volWave10yPhase) - Math.PI) <= tol;
+  });
+  const markAreas = [
+    ...fearRanges.map(([s, e]) => [
+      { xAxis: s, itemStyle: { color: "rgba(231, 76, 60, 0.08)" } },
+      { xAxis: e },
+    ]),
+    ...euphRanges.map(([s, e]) => [
+      { xAxis: s, itemStyle: { color: "rgba(46, 204, 113, 0.08)" } },
+      { xAxis: e },
+    ]),
+  ];
+
+  const pi = Math.PI;
+  return {
+    animation: false,
+    grid: { left: 48, right: 16, top: 36, bottom: 42 },
+    tooltip: { trigger: "axis" },
+    legend: { top: 6 },
+    xAxis: { type: "time" },
+    yAxis: {
+      type: "value",
+      name: "Phase (rad)",
+      min: -3.5,
+      max: 3.5,
+    },
+    dataZoom: [
+      { type: "inside", xAxisIndex: 0 },
+      { type: "slider", xAxisIndex: 0, height: 18, bottom: 8 },
+    ],
+    series: [
+      {
+        name: "Price phase (5–9y)",
+        type: "line",
+        showSymbol: false,
+        data: phPrice,
+        markArea: markAreas.length ? { silent: true, data: markAreas } : undefined,
+        markLine: {
+          symbol: ["none", "none"],
+          silent: true,
+          data: [{ yAxis: 0 }, { yAxis: pi }, { yAxis: -pi }],
+        },
+      },
+      {
+        name: "Vol phase (8–14y)",
+        type: "line",
+        showSymbol: false,
+        data: phVol,
+      },
+    ],
+  };
+}
+
+function renderCycles(state, startDate, endDate) {
+  const cSignals = state.charts?.cyclesSignals;
+  const cPhases = state.charts?.cyclesPhases;
+  if (!cSignals && !cPhases) return;
+
+  const hasData = state.cyclesPoints && state.cyclesPoints.length;
+  const metaEl = state.ui?.cyclesMeta;
+  if (!hasData) {
+    if (metaEl) metaEl.textContent = "No cycles data loaded (expected: data/cycles_daily.csv).";
+    return;
+  }
+
+  const latest = state.cyclesPoints[state.cyclesPoints.length - 1];
+  if (metaEl) {
+    const parts = [];
+    if (latest?.risk !== null && latest?.risk !== undefined) parts.push(`risk ×${fmtNum(latest.risk, 2)}`);
+    if (latest?.volZ !== null && latest?.volZ !== undefined) parts.push(`vol_z ${fmtNum(latest.volZ, 2)}`);
+    if (latest?.priceZ !== null && latest?.priceZ !== undefined) parts.push(`price_z ${fmtNum(latest.priceZ, 2)}`);
+    const fe = state.fearByDate ? state.fearByDate.get(latest.date) : null;
+    if (fe && fe.muFear !== null) parts.push(`fear ETA ${fmtNum(fe.muFear, 1)}m`);
+    if (fe && fe.muEuph !== null) parts.push(`euph ETA ${fmtNum(fe.muEuph, 1)}m`);
+    if (fe && fe.conf !== null) parts.push(`conf ${fmtNum(fe.conf * 100, 0)}%`);
+    metaEl.textContent = parts.join(" · ");
+  }
+
+  // Respect toggles.
+  const showSignals = state.ui?.toggleCycleSignals ? state.ui.toggleCycleSignals.checked : true;
+  const showPhases = state.ui?.toggleCyclePhases ? state.ui.toggleCyclePhases.checked : true;
+  const sigEl = document.getElementById("chartCyclesSignals");
+  const phEl = document.getElementById("chartCyclesPhases");
+  if (sigEl) sigEl.hidden = !showSignals;
+  if (phEl) phEl.hidden = !showPhases;
+
+  if (showSignals && cSignals) {
+    cSignals.setOption(buildCyclesSignalsOption(state, startDate, endDate), true);
+  }
+  if (showPhases && cPhases) {
+    cPhases.setOption(buildCyclesPhasesOption(state, startDate, endDate), true);
+  }
+}
+
 function renderAll(state) {
   const enabledStates = getSelectedStates();
   const clamped = clampRange(state.minDate, state.maxDate, state.ui.start.value, state.ui.end.value);
@@ -657,6 +936,8 @@ function renderAll(state) {
 
   const focusDate = state.selectedDate || clamped.endDate;
   renderPortfolioPanel(state, focusDate);
+  renderFearCalendar(state);
+  renderCycles(state, clamped.startDate, clamped.endDate);
 }
 
 function wireUi(state) {
@@ -691,6 +972,28 @@ function wireUi(state) {
     state.page += 1;
     renderTable(state, state.filteredRows || []);
   });
+
+  if (state.ui.toggleCycleSignals) {
+    state.ui.toggleCycleSignals.addEventListener("change", () => {
+      const clamped = clampRange(state.minDate, state.maxDate, state.ui.start.value, state.ui.end.value);
+      renderCycles(state, clamped.startDate, clamped.endDate);
+      // Resize after show/hide.
+      try {
+        state.charts.cyclesSignals && state.charts.cyclesSignals.resize();
+        state.charts.cyclesPhases && state.charts.cyclesPhases.resize();
+      } catch {}
+    });
+  }
+  if (state.ui.toggleCyclePhases) {
+    state.ui.toggleCyclePhases.addEventListener("change", () => {
+      const clamped = clampRange(state.minDate, state.maxDate, state.ui.start.value, state.ui.end.value);
+      renderCycles(state, clamped.startDate, clamped.endDate);
+      try {
+        state.charts.cyclesSignals && state.charts.cyclesSignals.resize();
+        state.charts.cyclesPhases && state.charts.cyclesPhases.resize();
+      } catch {}
+    });
+  }
 }
 
 function pickDefaultRange(state) {
@@ -707,11 +1010,17 @@ function pickDefaultRange(state) {
 function initCharts() {
   const main = echarts.init(document.getElementById("chartMain"));
   const mix = echarts.init(document.getElementById("chartMix"));
+  const cyclesSignalsEl = document.getElementById("chartCyclesSignals");
+  const cyclesPhasesEl = document.getElementById("chartCyclesPhases");
+  const cyclesSignals = cyclesSignalsEl ? echarts.init(cyclesSignalsEl) : null;
+  const cyclesPhases = cyclesPhasesEl ? echarts.init(cyclesPhasesEl) : null;
   window.addEventListener("resize", () => {
     main.resize();
     mix.resize();
+    if (cyclesSignals) cyclesSignals.resize();
+    if (cyclesPhases) cyclesPhases.resize();
   });
-  return { main, mix };
+  return { main, mix, cyclesSignals, cyclesPhases };
 }
 
 function wireChartInteractions(state) {
@@ -934,6 +1243,74 @@ function normalizePortfolioRows(rows) {
   return out;
 }
 
+function normalizeFearCalRows(rows) {
+  const out = [];
+  for (const r of rows) {
+    const m = String(r.month_end || r.month || "").trim();
+    if (!m) continue;
+    const label = String(r.label || "NONE").trim();
+    const f36 = Number(r.fear_window_36m) === 1;
+    const e36 = Number(r.euphoria_window_36m) === 1;
+    const asOf = String(r.as_of_month_end || "").trim();
+    const fearPeak = String(r.fear_peak_month_end || "").trim();
+    const euphTrough = String(r.euphoria_trough_month_end || "").trim();
+    out.push({ month: m, label, f36, e36, asOf, fearPeak, euphTrough });
+  }
+  out.sort((a, b) => (a.month < b.month ? -1 : 1));
+  return out;
+}
+
+function normalizeFearRows(rows) {
+  const out = [];
+  for (const r of rows) {
+    const date = String(r.time || r.date || r.as_of_date || "").trim();
+    if (!date) continue;
+    const muFear = Number(r.months_until_fear);
+    const muEuph = Number(r.months_until_euphoria);
+    const conf = Number(r.confidence);
+    const fearTrig = Number(r.fear_trigger) === 1;
+    const euphTrig = Number(r.euphoria_trigger) === 1;
+    const fearLvl = Number(r.fear_level);
+    const euphLvl = Number(r.euphoria_level);
+    out.push({
+      date,
+      muFear: Number.isFinite(muFear) ? muFear : null,
+      muEuph: Number.isFinite(muEuph) ? muEuph : null,
+      conf: Number.isFinite(conf) ? conf : null,
+      fearTrig,
+      euphTrig,
+      fearLvl: Number.isFinite(fearLvl) ? fearLvl : 0,
+      euphLvl: Number.isFinite(euphLvl) ? euphLvl : 0,
+    });
+  }
+  out.sort((a, b) => (a.date < b.date ? -1 : 1));
+  return out;
+}
+
+function normalizeCyclesRows(rows) {
+  const out = [];
+  for (const r of rows) {
+    const date = String(r.date || r.time || r.as_of_date || "").trim();
+    if (!date) continue;
+    const num = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    out.push({
+      date,
+      risk: num(r.risk_multiplier),
+      priceZ: num(r.price_cycle_z),
+      volZ: num(r.vol_z),
+      wave7y: num(r.wave_7y),
+      wave7yPhase: num(r.wave_7y_phase),
+      volWave10y: num(r.vol_wave_10y),
+      volWave10yPhase: num(r.vol_wave_10y_phase),
+    });
+  }
+  out.sort((a, b) => (a.date < b.date ? -1 : 1));
+  return out;
+}
+
 function buildMaps(state) {
   state.closeByDate = new Map();
   for (const p of state.nasdaqPoints) state.closeByDate.set(p.date, p.close);
@@ -954,19 +1331,37 @@ function buildMaps(state) {
   state.portfolioByDate = new Map();
   for (const r of state.portfolioRows || []) state.portfolioByDate.set(r.date, r);
 
+  state.fearByDate = new Map();
+  for (const r of state.fearRows || []) state.fearByDate.set(r.date, r);
+
+  state.cyclesByDate = new Map();
+  for (const r of state.cyclesRows || []) state.cyclesByDate.set(r.date, r);
+
+  state.cyclesPoints = (state.cyclesRows || []).map((r) => ({
+    date: r.date,
+    ms: toUtcMs(r.date),
+    wave7y: r.wave7y,
+    volWave10y: r.volWave10y,
+    wave7yPhase: r.wave7yPhase,
+    volWave10yPhase: r.volWave10yPhase,
+    risk: r.risk,
+    volZ: r.volZ,
+    priceZ: r.priceZ,
+  }));
+
   // For accurate click-to-date mapping, use the daily state calendar (not only trading days).
   state.statePoints = state.stateRows.map((r) => ({ date: r.date, ms: toUtcMs(r.date) }));
 
   state.minDate = state.stateRows.length ? state.stateRows[0].date : state.nasdaqPoints[0].date;
-    state.maxDate = state.stateRows.length 
-      ? state.stateRows[state.stateRows.length - 1].date 
-      : state.nasdaqPoints[state.nasdaqPoints.length - 1].date;
-      
-    // Extend maxDate by 7 days to ensure recent data is always visible despite timezone/lag issues.
-    if (state.maxDate) {
-      state.maxDate = addDays(state.maxDate, 7);
-    }
+  state.maxDate = state.stateRows.length
+    ? state.stateRows[state.stateRows.length - 1].date
+    : state.nasdaqPoints[state.nasdaqPoints.length - 1].date;
+
+  // Extend maxDate by 7 days to ensure recent data is always visible despite timezone/lag issues.
+  if (state.maxDate) {
+    state.maxDate = addDays(state.maxDate, 7);
   }
+}
 
 function syncDateLimits(state) {
   if (!state.ui?.start || !state.ui?.end) return;
@@ -986,18 +1381,27 @@ function ensureLatestVisible(state) {
 
 async function loadFromDefaultPaths(state) {
   setLoadStatus("Loading CSVs...");
-  const [nasdaqText, statesText, portfolioText] = await Promise.all([
+  const [nasdaqText, statesText, portfolioText, fearText, fearCalText, cyclesText] = await Promise.all([
     fetchText(DEFAULT_PATHS.nasdaq1d),
     fetchText(DEFAULT_PATHS.states),
     fetchTextOptional(DEFAULT_PATHS.portfolio),
+    fetchTextOptional(DEFAULT_PATHS.fear),
+    fetchTextOptional(DEFAULT_PATHS.fearCal),
+    fetchTextOptional(DEFAULT_PATHS.cyclesDaily),
   ]);
 
   const nasdaqRows = parseCsv(nasdaqText);
   const statesRows = parseCsv(statesText);
   const portfolioRows = portfolioText ? parseCsv(portfolioText) : [];
+  const fearRows = fearText ? parseCsv(fearText) : [];
+  const fearCalRows = fearCalText ? parseCsv(fearCalText) : [];
+  const cyclesRows = cyclesText ? parseCsv(cyclesText) : [];
   state.nasdaqPoints = normalizeNasdaqRows(nasdaqRows);
   state.stateRows = normalizeStateRows(statesRows);
   state.portfolioRows = normalizePortfolioRows(portfolioRows);
+  state.fearRows = normalizeFearRows(fearRows);
+  state.fearCalRows = normalizeFearCalRows(fearCalRows);
+  state.cyclesRows = normalizeCyclesRows(cyclesRows);
   buildMaps(state);
   syncDateLimits(state);
   ensureLatestVisible(state);
@@ -1035,10 +1439,15 @@ function boot() {
     nasdaqPoints: [],
     stateRows: [],
     portfolioRows: [],
+    fearRows: [],
+    cyclesRows: [],
+    cyclesPoints: [],
     closeByDate: new Map(),
     stateByDate: new Map(),
     scoreByDate: new Map(),
     portfolioByDate: new Map(),
+    fearByDate: new Map(),
+    cyclesByDate: new Map(),
     minDate: "1970-01-01",
     maxDate: "1970-01-01",
     ui: {
@@ -1055,9 +1464,14 @@ function boot() {
       fileNasdaq: document.getElementById("fileNasdaq"),
       fileStates: document.getElementById("fileStates"),
       filePortfolio: document.getElementById("filePortfolio"),
+      fearCalendar: document.getElementById("fearCalendar"),
+      fearCalendarMeta: document.getElementById("fearCalendarMeta"),
       portfolioDate: document.getElementById("portfolioDate"),
       portfolioMeta: document.getElementById("portfolioMeta"),
       portfolioWeights: document.getElementById("portfolioWeights"),
+      toggleCycleSignals: document.getElementById("toggleCycleSignals"),
+      toggleCyclePhases: document.getElementById("toggleCyclePhases"),
+      cyclesMeta: document.getElementById("cyclesMeta"),
     },
   };
 

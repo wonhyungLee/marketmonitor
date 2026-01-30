@@ -110,6 +110,42 @@
         </section>
       </section>
 
+      <section class="grid">
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <h2>Cycles</h2>
+              <p class="muted">NASDAQ long-run cycle context (price wave, volatility wave, and phases).</p>
+            </div>
+            <div class="controls">
+              <div class="control">
+                <span class="control-label">Display</span>
+                <div class="checks">
+                  <label class="check"><input id="toggleCycleSignals" type="checkbox" checked />Signals</label>
+                  <label class="check"><input id="toggleCyclePhases" type="checkbox" checked />Phases</label>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="chart chart-sm" id="chartCyclesSignals" aria-label="Cycle signals chart"></div>
+          <div class="chart chart-sm" id="chartCyclesPhases" aria-label="Cycle phases chart"></div>
+          <div class="muted small" id="cyclesMeta"></div>
+        </section>
+      </section>
+
+      
+
+      <section class="card" id="cardFearCalendar">
+        <div class="card-head">
+          <div>
+            <h2>Fear/Euphoria Forecast Calendar</h2>
+            <p class="muted">Month-level cycle forecast windows (anchored to the latest forecast). <a href="../data/fear_euphoria_forecast.ics">Download .ics</a></p>
+          </div>
+        </div>
+        <div class="calendar" id="fearCalendar"></div>
+        <div class="muted small" id="fearCalendarMeta"></div>
+      </section>
+
       <section class="card">
         <div class="card-head">
           <div>

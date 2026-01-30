@@ -1,14 +1,17 @@
 import { useState, useEffect } from "react";
-import Papa from "papaparse";
+import * as Papa from "papaparse";
 import { addDays, format, parseISO } from "date-fns";
 import { fetchCsv } from "@/lib/utils";
-import type { DashboardData, MarketStateRow, NasdaqRow, PortfolioRow } from "@/types";
+import type { DashboardData, MarketStateRow, NasdaqRow, PortfolioRow, CyclesRow, FearEuphoriaRow, FearCalendarRow } from "@/types";
 
 const URLS = {
   // Use absolute paths to ensure correct fetching regardless of current route
   states: "/data/market_states_daily.csv",
   nasdaq: "/data/nasdaq_dly_ixic_1d.csv",
   portfolio: "/data/portfolio_daily.csv",
+  cycles: "/data/cycles_daily.csv",
+  fearEuphoria: "/data/fear_euphoria_daily.csv",
+  fearCalendar: "/data/fear_euphoria_calendar.csv",
 };
 
 function parseStateRow(row: any): MarketStateRow {
@@ -20,6 +23,60 @@ function parseStateRow(row: any): MarketStateRow {
     equity: row.equity_weight ? parseFloat(row.equity_weight) : null,
     action: row.action || "",
     triggers: row.triggers || "",
+  };
+}
+
+
+function toNum(v: any): number | null {
+  const n = v === "" || v === null || v === undefined ? NaN : parseFloat(v);
+  return Number.isFinite(n) ? n : null;
+}
+function toBool(v: any): boolean {
+  if (v === true) return true;
+  const s = (v ?? "").toString().trim().toLowerCase();
+  return s === "1" || s === "true" || s === "yes" || s === "y";
+}
+
+function parseCycleRow(row: any): CyclesRow {
+  return {
+    date: row.date || row.time || "",
+    risk_multiplier: toNum(row.risk_multiplier),
+    price_cycle_z: toNum(row.price_cycle_z),
+    vol_z: toNum(row.vol_z),
+    wave_7y: toNum(row.wave_7y),
+    wave_7y_phase: toNum(row.wave_7y_phase),
+    vol_wave_10y: toNum(row.vol_wave_10y),
+    vol_wave_10y_phase: toNum(row.vol_wave_10y_phase),
+  };
+}
+
+function parseFearEuphoriaRow(row: any): FearEuphoriaRow {
+  return {
+    date: row.date || row.time || "",
+    months_until_fear: toNum(row.months_until_fear),
+    months_until_euphoria: toNum(row.months_until_euphoria),
+    confidence: toNum(row.confidence),
+    fear_window_24m: toBool(row.fear_window_24m),
+    fear_window_36m: toBool(row.fear_window_36m),
+    euphoria_window_24m: toBool(row.euphoria_window_24m),
+    euphoria_window_36m: toBool(row.euphoria_window_36m),
+    fear_trigger: toBool(row.fear_trigger),
+    euphoria_trigger: toBool(row.euphoria_trigger),
+    fear_level: toNum(row.fear_level),
+    euphoria_level: toNum(row.euphoria_level),
+  };
+}
+
+function parseFearCalendarRow(row: any): FearCalendarRow {
+  return {
+    month: row.month || row.month_end || row.time || "",
+    f24: toNum(row.f24),
+    f36: toNum(row.f36),
+    e24: toNum(row.e24),
+    e36: toNum(row.e36),
+    as_of: row.as_of || "",
+    fear_peak: row.fear_peak || "",
+    euph_trough: row.euph_trough || "",
   };
 }
 
@@ -49,14 +106,20 @@ export function useWarRoomData() {
     setLoading(true);
     setError(null);
     try {
-      const [csvStates, csvNasdaq, csvPortfolio] = await Promise.allSettled([
+      const [csvStates, csvNasdaq, csvPortfolio, csvCycles, csvFearEuph, csvFearCal] = await Promise.allSettled([
         fetchCsv(URLS.states),
         fetchCsv(URLS.nasdaq),
         fetchCsv(URLS.portfolio),
+        fetchCsv(URLS.cycles),
+        fetchCsv(URLS.fearEuphoria),
+        fetchCsv(URLS.fearCalendar),
       ]);
 
       let states: MarketStateRow[] = [];
       let nasdaq: NasdaqRow[] = [];
+      let cycles: CyclesRow[] | undefined = undefined;
+      let fearEuphoria: FearEuphoriaRow[] | undefined = undefined;
+      let fearCalendar: FearCalendarRow[] | undefined = undefined;
       const portfolio = new Map<string, PortfolioRow>();
 
       if (csvStates.status === "fulfilled") {
@@ -83,6 +146,22 @@ export function useWarRoomData() {
           if (r.date) portfolio.set(r.date.trim(), parsePortfolioRow(r));
         });
       }
+      if (csvCycles.status === "fulfilled") {
+        const parsed = Papa.parse(csvCycles.value, { header: true, skipEmptyLines: true });
+        cycles = (parsed.data as any[]).map(parseCycleRow).filter((r) => r.date).sort((a, b) => (a.date < b.date ? -1 : 1));
+      }
+
+      if (csvFearEuph.status === "fulfilled") {
+        const parsed = Papa.parse(csvFearEuph.value, { header: true, skipEmptyLines: true });
+        fearEuphoria = (parsed.data as any[]).map(parseFearEuphoriaRow).filter((r) => r.date).sort((a, b) => (a.date < b.date ? -1 : 1));
+      }
+
+      if (csvFearCal.status === "fulfilled") {
+        const parsed = Papa.parse(csvFearCal.value, { header: true, skipEmptyLines: true });
+        fearCalendar = (parsed.data as any[]).map(parseFearCalendarRow).filter((r) => r.month);
+      }
+
+
 
       // Determine date range
       let minDate = "2020-01-01";
@@ -104,6 +183,9 @@ export function useWarRoomData() {
         states: states.sort((a, b) => (a.date < b.date ? -1 : 1)),
         nasdaq,
         portfolio,
+        cycles,
+        fearEuphoria,
+        fearCalendar,
         minDate,
         maxDate: extendedMax,
       });

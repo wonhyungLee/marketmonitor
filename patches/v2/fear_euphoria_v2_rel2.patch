@@ -1,0 +1,1611 @@
+diff -ruN oldroot/.env.example newroot/.env.example
+--- oldroot/.env.example	2026-01-30 01:13:35.000000000 +0000
++++ newroot/.env.example	2026-01-30 07:03:01.000000000 +0000
+@@ -16,3 +16,32 @@
+ AUTO_REFRESH_DAILY_INTERVAL_SEC=10800
+ AUTO_REFRESH_WINDOW_DAYS=7
+ AUTO_REFRESH_ON_WEBHOOK=true
++
++# --- Portfolio cycle scaling (optional) ---
++# When enabled, the portfolio engine scales risk assets by `risk_multiplier`
++# from ./data/cycles_daily.csv (exported in the daily job).
++PORTFOLIO_USE_CYCLES=false
++PORTFOLIO_CYCLES_CSV_NAME=cycles_daily.csv
++
++# --- Fear / Euphoria overlay (optional, enabled by default) ---
++# Uses ./data/fear_euphoria_daily.csv (exported in the daily job).
++# FEAR trigger now supports tiered defense levels (L1/L2/L3).
++# - L1: base trigger
++# - L2: DEFCON1 or stronger vol spike / closer-to-peak
++# - L3: DEFCON1 + strong vol spike
++# The portfolio engine will cap leverage + scale risk assets by the level.
++PORTFOLIO_USE_FEAR_EUPHORIA=true
++
++# Tiered leverage caps
++PORTFOLIO_FEAR_L1_LEVERAGE_CAP=1.2
++PORTFOLIO_FEAR_L2_LEVERAGE_CAP=1.0
++PORTFOLIO_FEAR_L3_LEVERAGE_CAP=0.6
++
++# Tiered risk multipliers applied to risk assets
++PORTFOLIO_FEAR_L1_RISK_MULTIPLIER=0.85
++PORTFOLIO_FEAR_L2_RISK_MULTIPLIER=0.70
++PORTFOLIO_FEAR_L3_RISK_MULTIPLIER=0.50
++
++# Legacy (kept for backward compatibility, but not used when fear_level exists)
++PORTFOLIO_FEAR_LEVERAGE_CAP=1.0
++PORTFOLIO_FEAR_RISK_MULTIPLIER=0.6
+diff -ruN oldroot/README.md newroot/README.md
+--- oldroot/README.md	2026-01-30 01:13:35.000000000 +0000
++++ newroot/README.md	2026-01-30 07:03:50.000000000 +0000
+@@ -28,6 +28,43 @@
+ python scripts/build_portfolio_daily.py
+ ```
+ 
++## Cycle Indicators (NASDAQ price/volatility)
++
++The daily job can export NASDAQ cycle features to:
++- `data/cycles_monthly.csv` (monthly features)
++- `data/cycles_daily.csv` (daily forward-filled snapshot)
++
++If enabled, the multi-asset portfolio engine will scale **risk assets** by the exported
++`risk_multiplier` (0.60 ~ 1.15-ish) before applying leverage caps:
++
++- Enable: `PORTFOLIO_USE_CYCLES=true`
++- CSV name: `PORTFOLIO_CYCLES_CSV_NAME=cycles_daily.csv`
++
++These are *risk/phase context indicators*, not point forecasts.
++
++## Fear / Euphoria Program (Cycle forecast + confirm triggers)
++
++The daily job also exports a "fear / euphoria" signal built on top of the long-run volatility cycle:
++
++- `data/fear_euphoria_monthly.csv` (forecast: months-until FEAR/EUPH + confidence)
++- `data/fear_euphoria_daily.csv` (daily snapshot + confirm trigger flags + severity levels)
++- `data/fear_euphoria_calendar.csv` (month-level calendar view of forecast windows, anchored to latest forecast)
++- `data/fear_euphoria_forecast.ics` (iCal events for window starts + predicted peak/trough)
++
++Design:
++
++1) **Forecast window**: "Is FEAR/EUPH likely within the next 24–36 months?" (cycle-based)
++2) **Confirm trigger** (only fires inside the window):
++   - FEAR trigger = volatility spike + trend break + DEFCON1/2
++   - EUPH trigger = volatility very low + overextension + momentum slowdown
++
++Portfolio overlay:
++
++- When FEAR trigger is ON, the portfolio engine reduces risk using tiered defense levels (L1/L2/L3):
++  - caps leverage
++  - scales risk assets
++  See `.env.example`: `PORTFOLIO_USE_FEAR_EUPHORIA`, `PORTFOLIO_FEAR_L*_LEVERAGE_CAP`, `PORTFOLIO_FEAR_L*_RISK_MULTIPLIER`.
++
+ ## View As A Site (Table + Charts)
+ 
+ ```powershell
+Binary files oldroot/app/__pycache__/__init__.cpython-311.pyc and newroot/app/__pycache__/__init__.cpython-311.pyc differ
+Binary files oldroot/app/__pycache__/cycles.cpython-311.pyc and newroot/app/__pycache__/cycles.cpython-311.pyc differ
+Binary files oldroot/app/__pycache__/db.cpython-311.pyc and newroot/app/__pycache__/db.cpython-311.pyc differ
+Binary files oldroot/app/__pycache__/engine.cpython-311.pyc and newroot/app/__pycache__/engine.cpython-311.pyc differ
+Binary files oldroot/app/__pycache__/exporter.cpython-311.pyc and newroot/app/__pycache__/exporter.cpython-311.pyc differ
+Binary files oldroot/app/__pycache__/fear_euphoria.cpython-311.pyc and newroot/app/__pycache__/fear_euphoria.cpython-311.pyc differ
+Binary files oldroot/app/__pycache__/job_control.cpython-311.pyc and newroot/app/__pycache__/job_control.cpython-311.pyc differ
+Binary files oldroot/app/__pycache__/main.cpython-311.pyc and newroot/app/__pycache__/main.cpython-311.pyc differ
+Binary files oldroot/app/__pycache__/models.cpython-311.pyc and newroot/app/__pycache__/models.cpython-311.pyc differ
+Binary files oldroot/app/__pycache__/notifier.cpython-311.pyc and newroot/app/__pycache__/notifier.cpython-311.pyc differ
+Binary files oldroot/app/__pycache__/portfolio.cpython-311.pyc and newroot/app/__pycache__/portfolio.cpython-311.pyc differ
+Binary files oldroot/app/__pycache__/settings.cpython-311.pyc and newroot/app/__pycache__/settings.cpython-311.pyc differ
+Binary files oldroot/app/__pycache__/snapshot.cpython-311.pyc and newroot/app/__pycache__/snapshot.cpython-311.pyc differ
+diff -ruN oldroot/app/cycles.py newroot/app/cycles.py
+--- oldroot/app/cycles.py	1970-01-01 00:00:00.000000000 +0000
++++ newroot/app/cycles.py	2026-01-30 05:11:12.000000000 +0000
+@@ -0,0 +1,301 @@
++from __future__ import annotations
++
++"""Cycle indicators (price & volatility) for NASDAQ.
++
++This module builds *cycle features* from long-run NASDAQ price history.
++
++Important notes
++---------------
++* These indicators are **decision support** (risk/phase context), not point forecasts.
++* We avoid heavy dependencies (no SciPy). Implementation uses NumPy/Pandas.
++* Cycle phase is estimated from a trailing window via FFT band-pass + Hilbert transform.
++  This is still a smoothed indicator; do not treat it as a strict trading signal.
++"""
++
++import math
++from dataclasses import dataclass
++from datetime import date
++from pathlib import Path
++from typing import Optional, Tuple
++
++import numpy as np
++import pandas as pd
++
++
++# -----------------------------------------------------------------------------
++# Core helpers
++# -----------------------------------------------------------------------------
++
++
++def _to_monthly_last_close(daily: pd.Series) -> pd.Series:
++    """Convert a daily price series to month-end (last available) prices."""
++    if daily is None or daily.empty:
++        return pd.Series(dtype="float64")
++    s = pd.to_numeric(daily, errors="coerce")
++    s = s.dropna()
++    if s.empty:
++        return pd.Series(dtype="float64")
++    s = s.sort_index()
++    return s.resample("M").last().dropna()
++
++
++def _rolling_zscore(x: pd.Series, window: int) -> pd.Series:
++    mu = x.rolling(window, min_periods=max(10, window // 3)).mean()
++    sd = x.rolling(window, min_periods=max(10, window // 3)).std(ddof=0)
++    z = (x - mu) / sd.replace(0.0, np.nan)
++    return z
++
++
++def _bandpass_fft(x: np.ndarray, min_period: float, max_period: float) -> np.ndarray:
++    """Simple FFT band-pass filter.
++
++    Parameters
++    ----------
++    x : array
++        Input signal (1D). Assumed evenly sampled.
++    min_period, max_period : float
++        Period bounds in *samples* (e.g. months). Keep frequencies between
++        1/max_period and 1/min_period.
++
++    Returns
++    -------
++    y : array
++        Filtered signal in the same length as x.
++    """
++    x = np.asarray(x, dtype=float)
++    n = len(x)
++    if n < 8:
++        return np.full(n, np.nan)
++
++    x = x - np.nanmean(x)
++    # Replace remaining NaNs with 0 to keep FFT stable.
++    x = np.nan_to_num(x)
++
++    X = np.fft.rfft(x)
++    freqs = np.fft.rfftfreq(n, d=1.0)  # cycles per sample
++
++    f_low = 1.0 / float(max_period)
++    f_high = 1.0 / float(min_period)
++    mask = (freqs >= f_low) & (freqs <= f_high)
++    mask[0] = False  # drop DC
++
++    Xf = np.zeros_like(X)
++    Xf[mask] = X[mask]
++    y = np.fft.irfft(Xf, n=n)
++    return y
++
++
++def _analytic_signal(x: np.ndarray) -> np.ndarray:
++    """Compute analytic signal via an FFT-based Hilbert transform (no SciPy)."""
++    x = np.asarray(x, dtype=float)
++    n = len(x)
++    X = np.fft.fft(np.nan_to_num(x))
++    h = np.zeros(n)
++    if n % 2 == 0:
++        h[0] = 1
++        h[n // 2] = 1
++        h[1 : n // 2] = 2
++    else:
++        h[0] = 1
++        h[1 : (n + 1) // 2] = 2
++    return np.fft.ifft(X * h)
++
++
++def _rolling_bandpass_phase(
++    s: pd.Series,
++    window: int,
++    min_period: float,
++    max_period: float,
++) -> Tuple[pd.Series, pd.Series, pd.Series]:
++    """Rolling band-pass component + phase/amplitude (estimated at each timestamp).
++
++    For each time t, uses the trailing `window` samples up to t.
++    Outputs are aligned with the original index; the first (window-1) values are NaN.
++    """
++    s = pd.to_numeric(s, errors="coerce")
++    x = s.to_numpy(dtype=float)
++    n = len(x)
++    comp = np.full(n, np.nan)
++    phase = np.full(n, np.nan)
++    amp = np.full(n, np.nan)
++    if n < window:
++        return pd.Series(comp, index=s.index), pd.Series(phase, index=s.index), pd.Series(amp, index=s.index)
++
++    for i in range(window - 1, n):
++        seg = x[i - window + 1 : i + 1]
++        if np.isnan(seg).all():
++            continue
++        y = _bandpass_fft(seg, min_period=min_period, max_period=max_period)
++        z = _analytic_signal(y)
++        comp[i] = float(y[-1])
++        amp[i] = float(np.abs(z[-1]))
++        phase[i] = float(np.angle(z[-1]))  # [-pi, pi]
++
++    return (
++        pd.Series(comp, index=s.index),
++        pd.Series(phase, index=s.index),
++        pd.Series(amp, index=s.index),
++    )
++
++
++# -----------------------------------------------------------------------------
++# Public API
++# -----------------------------------------------------------------------------
++
++
++@dataclass(frozen=True)
++class CycleSnapshot:
++    as_of_date: str
++    risk_multiplier: float
++    price_cycle_z: Optional[float]
++    vol_z: Optional[float]
++    wave_7y: Optional[float]
++    wave_7y_phase: Optional[float]
++    vol_wave_10y: Optional[float]
++    vol_wave_10y_phase: Optional[float]
++
++
++def build_cycles_from_nasdaq_daily(
++    nasdaq_daily: pd.Series,
++    *,
++    price_trend_months: int = 120,
++    vol_smooth_months: int = 12,
++    phase_window_months: int = 240,
++) -> pd.DataFrame:
++    """Return a monthly DataFrame with cycle indicators.
++
++    Columns (monthly index):
++      - close
++      - logp
++      - price_cycle (logp - rolling trend)
++      - price_cycle_z (rolling z-score)
++      - vol_1m (|monthly log return|)
++      - vol_12m (rolling mean)
++      - vol_z (rolling z-score on vol_12m)
++      - wave_7y (band-pass 5–9y on price_cycle)
++      - wave_7y_phase, wave_7y_amp
++      - vol_wave_10y (band-pass 8–14y on vol_12m)
++      - vol_wave_10y_phase, vol_wave_10y_amp
++      - risk_multiplier (heuristic)
++    """
++    mclose = _to_monthly_last_close(nasdaq_daily)
++    if mclose.empty:
++        return pd.DataFrame()
++
++    df = pd.DataFrame({"close": mclose})
++    df["logp"] = np.log(df["close"].astype(float))
++    df["logret"] = df["logp"].diff()
++    df["vol_1m"] = df["logret"].abs()
++
++    # Causal trend removal (no centered filter): trailing 10y mean on log-price.
++    df["trend_logp"] = df["logp"].rolling(price_trend_months, min_periods=price_trend_months // 2).mean()
++    df["price_cycle"] = df["logp"] - df["trend_logp"]
++    df["price_cycle_z"] = _rolling_zscore(df["price_cycle"], window=price_trend_months)
++
++    # Volatility context
++    df["vol_12m"] = df["vol_1m"].rolling(vol_smooth_months, min_periods=vol_smooth_months).mean()
++    df["vol_z"] = _rolling_zscore(df["vol_12m"], window=price_trend_months)
++
++    # Medium/long waves and phases (rolling FFT band-pass + Hilbert)
++    wave_7y, wave_7y_phase, wave_7y_amp = _rolling_bandpass_phase(
++        df["price_cycle"].fillna(method="ffill"),
++        window=phase_window_months,
++        min_period=12 * 5.0,
++        max_period=12 * 9.0,
++    )
++    df["wave_7y"] = wave_7y
++    df["wave_7y_phase"] = wave_7y_phase
++    df["wave_7y_amp"] = wave_7y_amp
++
++    vol_wave_10y, vol_wave_10y_phase, vol_wave_10y_amp = _rolling_bandpass_phase(
++        df["vol_12m"].fillna(method="ffill"),
++        window=phase_window_months,
++        min_period=12 * 8.0,
++        max_period=12 * 14.0,
++    )
++    df["vol_wave_10y"] = vol_wave_10y
++    df["vol_wave_10y_phase"] = vol_wave_10y_phase
++    df["vol_wave_10y_amp"] = vol_wave_10y_amp
++
++    # Risk multiplier heuristic
++    df["risk_multiplier"] = _compute_risk_multiplier(df)
++    return df
++
++
++def _compute_risk_multiplier(df: pd.DataFrame) -> pd.Series:
++    """Translate cycle/vol context into a risk multiplier (0.6..1.15-ish).
++
++    Rules (intentionally simple):
++      - When *smoothed volatility* (vol_z) is high -> trim risk.
++      - When price cycle is above 0 and rolling over (wave_7y falling) -> slight trim.
++      - When price cycle is below 0 and recovering (wave_7y rising) -> slight add.
++    """
++    vol_z = pd.to_numeric(df.get("vol_z"), errors="coerce")
++    wave = pd.to_numeric(df.get("wave_7y"), errors="coerce")
++    wave_mom = wave.diff(1)
++
++    mult = pd.Series(1.0, index=df.index, dtype="float64")
++
++    # Volatility regime adjustments
++    mult = mult.where(~(vol_z > 1.0), other=mult * 0.75)
++    mult = mult.where(~((vol_z > 0.5) & (vol_z <= 1.0)), other=mult * 0.85)
++    mult = mult.where(~(vol_z < -0.5), other=mult * 1.05)
++
++    # Price wave context (small nudges)
++    mult = mult.where(~((wave > 0) & (wave_mom < 0)), other=mult * 0.90)
++    mult = mult.where(~((wave < 0) & (wave_mom > 0)), other=mult * 1.05)
++
++    # Clamp
++    return mult.clip(lower=0.60, upper=1.15)
++
++
++def load_cycle_snapshot(
++    as_of: date,
++    *,
++    data_dir: Optional[Path] = None,
++    csv_name: str = "cycles_daily.csv",
++) -> Optional[CycleSnapshot]:
++    """Load the cycle snapshot for a given date from exported daily cycles CSV."""
++    base_dir = Path(__file__).resolve().parent.parent
++    data_dir = data_dir or (base_dir / "data")
++    path = data_dir / csv_name
++    if not path.exists():
++        return None
++
++    try:
++        df = pd.read_csv(path)
++    except Exception:
++        return None
++
++    if df.empty or "date" not in df.columns:
++        return None
++
++    df["date"] = pd.to_datetime(df["date"], errors="coerce")
++    df = df.dropna(subset=["date"]).sort_values("date")
++    if df.empty:
++        return None
++
++    ts = pd.Timestamp(as_of)
++    df = df[df["date"] <= ts]
++    if df.empty:
++        return None
++    row = df.iloc[-1]
++    return CycleSnapshot(
++        as_of_date=str(pd.Timestamp(row["date"]).date()),
++        risk_multiplier=float(row.get("risk_multiplier", 1.0) or 1.0),
++        price_cycle_z=_safe_float(row.get("price_cycle_z")),
++        vol_z=_safe_float(row.get("vol_z")),
++        wave_7y=_safe_float(row.get("wave_7y")),
++        wave_7y_phase=_safe_float(row.get("wave_7y_phase")),
++        vol_wave_10y=_safe_float(row.get("vol_wave_10y")),
++        vol_wave_10y_phase=_safe_float(row.get("vol_wave_10y_phase")),
++    )
++
++
++def _safe_float(v) -> Optional[float]:
++    try:
++        if v is None or (isinstance(v, float) and math.isnan(v)):
++            return None
++        return float(v)
++    except Exception:
++        return None
+diff -ruN oldroot/app/exporter.py newroot/app/exporter.py
+--- oldroot/app/exporter.py	2026-01-30 01:13:35.000000000 +0000
++++ newroot/app/exporter.py	2026-01-30 06:59:55.000000000 +0000
+@@ -8,6 +8,8 @@
+ from zoneinfo import ZoneInfo
+ 
+ from app.portfolio import load_asset_universe, recommend_portfolio_from_px
++from app.cycles import build_cycles_from_nasdaq_daily
++from app.fear_euphoria import build_fear_euphoria_from_cycles_monthly, compute_daily_triggers
+ from app.settings import get_settings
+ 
+ CSV_HEADER = [
+@@ -262,6 +264,322 @@
+     return out_path
+ 
+ 
++def export_cycles_csv(conn, out_dir: Optional[Path] = None) -> tuple[Optional[Path], Optional[Path]]:
++    """Export NASDAQ cycle indicators.
++
++    Emits two files into ./data (or out_dir):
++      - cycles_monthly.csv: long-run cycle features on monthly data
++      - cycles_daily.csv: daily forward-filled snapshot used by portfolio scaling
++
++    Returns: (monthly_path, daily_path)
++    """
++    base_dir = Path(__file__).resolve().parent.parent
++    out_dir = out_dir or (base_dir / "data")
++    out_dir.mkdir(parents=True, exist_ok=True)
++    out_m = out_dir / "cycles_monthly.csv"
++    out_d = out_dir / "cycles_daily.csv"
++
++    # Pull NASDAQ daily closes.
++    rows = conn.execute(
++        """
++        SELECT time_utc_ms, value
++        FROM market_observations
++        WHERE series_id = ? AND interval = ?
++        ORDER BY time_utc_ms ASC
++        """,
++        ("NASDAQ_DLY_IXIC", "1D"),
++    ).fetchall()
++    if not rows:
++        return None, None
++
++    # Keep last close per UTC date.
++    by_date: Dict[str, float] = {}
++    for time_utc_ms, value in rows:
++        if time_utc_ms is None:
++            continue
++        date_str = datetime.fromtimestamp(time_utc_ms / 1000, tz=timezone.utc).date().isoformat()
++        by_date[date_str] = value
++
++    daily = pd.Series(by_date).sort_index()
++    daily.index = pd.to_datetime(daily.index)
++    daily = pd.to_numeric(daily, errors="coerce").dropna()
++    if daily.empty:
++        return None, None
++
++    cycles_m = build_cycles_from_nasdaq_daily(daily)
++    if cycles_m.empty:
++        return None, None
++
++    # Write monthly
++    cycles_m_out = cycles_m.copy()
++    cycles_m_out.index.name = "time"
++    cycles_m_out.reset_index().to_csv(out_m, index=False, encoding="utf-8")
++
++    # Forward-fill monthly snapshot to daily dates.
++    daily_dates = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
++    snap = cycles_m[[
++        "risk_multiplier",
++        "price_cycle_z",
++        "vol_z",
++        "wave_7y",
++        "wave_7y_phase",
++        "vol_wave_10y",
++        "vol_wave_10y_phase",
++    ]].copy()
++    snap.index = snap.index.to_period("M").to_timestamp("M")
++    snap_d = snap.reindex(pd.to_datetime(daily_dates).to_period("M").to_timestamp("M"))
++    snap_d.index = pd.to_datetime(daily_dates)
++    snap_d = snap_d.ffill()
++    snap_d = snap_d.reset_index().rename(columns={"index": "date"})
++    snap_d.to_csv(out_d, index=False, encoding="utf-8")
++
++    return out_m, out_d
++
++
++def export_fear_euphoria_csv(conn, out_dir: Optional[Path] = None) -> tuple[Optional[Path], Optional[Path]]:
++    """Export fear/euphoria forecast windows + confirm triggers.
++
++    Emits two files into ./data (or out_dir):
++      - fear_euphoria_monthly.csv: phase->months-ahead forecast + confidence
++      - fear_euphoria_daily.csv: daily forward-filled + confirm trigger flags
++
++    Returns: (monthly_path, daily_path)
++    """
++    base_dir = Path(__file__).resolve().parent.parent
++    out_dir = out_dir or (base_dir / "data")
++    out_dir.mkdir(parents=True, exist_ok=True)
++    cycles_m_path = out_dir / "cycles_monthly.csv"
++    cycles_d_path = out_dir / "cycles_daily.csv"
++    out_m = out_dir / "fear_euphoria_monthly.csv"
++    out_d = out_dir / "fear_euphoria_daily.csv"
++
++    # Need cycles_monthly (for phase/amp). If missing, try to create it.
++    if not cycles_m_path.exists() or not cycles_d_path.exists():
++        export_cycles_csv(conn, out_dir=out_dir)
++    if not cycles_m_path.exists():
++        return None, None
++
++    try:
++        cycles_m = pd.read_csv(cycles_m_path)
++    except Exception:
++        return None, None
++    if cycles_m.empty:
++        return None, None
++
++    fe_m = build_fear_euphoria_from_cycles_monthly(cycles_m)
++    if fe_m.empty:
++        return None, None
++    fe_m.to_csv(out_m, index=False, encoding="utf-8")
++
++    # Forward-fill monthly features to daily range.
++    # Use NASDAQ daily close range (DB) as the daily index, then merge triggers.
++    rows = conn.execute(
++        """
++        SELECT time_utc_ms, value
++        FROM market_observations
++        WHERE series_id = ? AND interval = ?
++        ORDER BY time_utc_ms ASC
++        """,
++        ("NASDAQ_DLY_IXIC", "1D"),
++    ).fetchall()
++    if not rows:
++        return out_m, None
++
++    by_date: Dict[str, float] = {}
++    for time_utc_ms, value in rows:
++        if time_utc_ms is None:
++            continue
++        date_str = datetime.fromtimestamp(time_utc_ms / 1000, tz=timezone.utc).date().isoformat()
++        by_date[date_str] = value
++
++    daily_close = pd.Series(by_date).sort_index()
++    daily_close.index = pd.to_datetime(daily_close.index)
++    daily_close = pd.to_numeric(daily_close, errors="coerce").dropna()
++    if daily_close.empty:
++        return out_m, None
++
++    # Use observed dates (trading days). This avoids weekend forward-fill artifacts in returns/vol.
++    daily_dates = pd.DatetimeIndex(daily_close.index).sort_values()
++
++    fe_m2 = fe_m.copy()
++    fe_m2["time"] = pd.to_datetime(fe_m2["time"], errors="coerce")
++    fe_m2 = fe_m2.dropna(subset=["time"]).sort_values("time")
++    fe_m2 = fe_m2.set_index(fe_m2["time"].dt.to_period("M").dt.to_timestamp("M")).drop(columns=["time"])
++
++    fe_d = fe_m2.reindex(pd.to_datetime(daily_dates).to_period("M").to_timestamp("M"))
++    fe_d.index = pd.to_datetime(daily_dates)
++    fe_d = fe_d.ffill()
++    fe_d.index.name = "time"
++
++    # Daily macro state (DEFCON1/2) for confirm trigger.
++    state_rows = conn.execute(
++        """
++        SELECT as_of_date, state
++        FROM daily_states
++        ORDER BY as_of_date ASC
++        """
++    ).fetchall()
++    st = pd.Series({r[0]: r[1] for r in state_rows})
++    st.index = pd.to_datetime(st.index, errors="coerce")
++
++    trig = compute_daily_triggers(
++        daily_close=daily_close,
++        daily_state=st,
++        forecast_daily=fe_d,
++    )
++
++    merged = pd.concat([fe_d, trig], axis=1)
++    merged = merged.reset_index().rename(columns={"index": "date"})
++    merged.to_csv(out_d, index=False, encoding="utf-8")
++
++    return out_m, out_d
++
++
++
++def export_fear_euphoria_calendar(conn, out_dir: Optional[Path] = None, *, horizon_months: int = 60, lookback_months: int = 12) -> tuple[Optional[Path], Optional[Path]]:
++    """Export a month-level 'calendar' view for fear/euphoria windows.
++
++    Generates:
++      - fear_euphoria_calendar.csv: month_end rows with window flags (24/36m)
++      - fear_euphoria_forecast.ics: iCal events for window starts + predicted peak/trough
++
++    The calendar is anchored to the *latest* monthly forecast row.
++
++    Returns: (csv_path, ics_path)
++    """
++    base_dir = Path(__file__).resolve().parent.parent
++    out_dir = out_dir or (base_dir / "data")
++    out_dir.mkdir(parents=True, exist_ok=True)
++    fe_m_path = out_dir / "fear_euphoria_monthly.csv"
++    cal_csv = out_dir / "fear_euphoria_calendar.csv"
++    cal_ics = out_dir / "fear_euphoria_forecast.ics"
++
++    if not fe_m_path.exists():
++        # attempt to create
++        export_fear_euphoria_csv(conn, out_dir=out_dir)
++    if not fe_m_path.exists():
++        return None, None
++
++    try:
++        fe_m = pd.read_csv(fe_m_path)
++    except Exception:
++        return None, None
++    if fe_m.empty:
++        return None, None
++
++    fe_m["time"] = pd.to_datetime(fe_m.get("time"), errors="coerce")
++    fe_m = fe_m.dropna(subset=["time"]).sort_values("time")
++    if fe_m.empty:
++        return None, None
++
++    last = fe_m.iloc[-1]
++    as_of = pd.Timestamp(last["time"]).to_period("M").to_timestamp("M")
++
++    def _to_float(v):
++        try:
++            return float(v)
++        except Exception:
++            return None
++
++    mu_f = _to_float(last.get("months_until_fear"))
++    mu_e = _to_float(last.get("months_until_euphoria"))
++
++    # Predicted peak/trough month (month-end) from latest estimate.
++    peak_f = as_of + pd.DateOffset(months=int(round(mu_f))) if mu_f is not None and mu_f >= 0 else None
++    trough_e = as_of + pd.DateOffset(months=int(round(mu_e))) if mu_e is not None and mu_e >= 0 else None
++
++    fear36_start = peak_f - pd.DateOffset(months=36) if peak_f is not None else None
++    fear24_start = peak_f - pd.DateOffset(months=24) if peak_f is not None else None
++    euph36_start = trough_e - pd.DateOffset(months=36) if trough_e is not None else None
++    euph24_start = trough_e - pd.DateOffset(months=24) if trough_e is not None else None
++
++    start = as_of - pd.DateOffset(months=int(lookback_months))
++    end = as_of + pd.DateOffset(months=int(horizon_months))
++    months = pd.period_range(start=start.to_period("M"), end=end.to_period("M"), freq="M").to_timestamp("M")
++
++    def _in_range(ts, a, b):
++        if ts is None or a is None or b is None:
++            return False
++        return (ts >= a) and (ts <= b)
++
++    rows = []
++    for ts in months:
++        f36 = int(_in_range(ts, fear36_start, peak_f)) if peak_f is not None else 0
++        f24 = int(_in_range(ts, fear24_start, peak_f)) if peak_f is not None else 0
++        e36 = int(_in_range(ts, euph36_start, trough_e)) if trough_e is not None else 0
++        e24 = int(_in_range(ts, euph24_start, trough_e)) if trough_e is not None else 0
++
++        label = []
++        if f36:
++            label.append("FEAR")
++        if e36:
++            label.append("EUPH")
++        label = "+".join(label) if label else "NONE"
++
++        rows.append(
++            {
++                "month_end": ts.date().isoformat(),
++                "as_of_month_end": as_of.date().isoformat(),
++                "fear_peak_month_end": peak_f.date().isoformat() if peak_f is not None else "",
++                "euphoria_trough_month_end": trough_e.date().isoformat() if trough_e is not None else "",
++                "fear_window_36m": f36,
++                "fear_window_24m": f24,
++                "euphoria_window_36m": e36,
++                "euphoria_window_24m": e24,
++                "label": label,
++            }
++        )
++
++    pd.DataFrame(rows).to_csv(cal_csv, index=False, encoding="utf-8")
++
++    # iCal (ICS): simple all-day events at month-start with 1-day duration
++    def _ics_date(ts: pd.Timestamp) -> str:
++        return ts.strftime("%Y%m%d")
++
++    def _vevent(uid: str, summary: str, dt: pd.Timestamp, desc: str = "") -> str:
++        # DTSTART/DTEND as all-day (date)
++        d0 = _ics_date(dt.to_period("M").to_timestamp("D"))
++        d1 = _ics_date((dt.to_period("M").to_timestamp("D") + pd.Timedelta(days=1)))
++        out = [
++            "BEGIN:VEVENT",
++            f"UID:{uid}",
++            f"DTSTART;VALUE=DATE:{d0}",
++            f"DTEND;VALUE=DATE:{d1}",
++            f"SUMMARY:{summary}",
++        ]
++        if desc:
++            out.append(f"DESCRIPTION:{desc}")
++        out.append("END:VEVENT")
++        return "\n".join(out)
++
++    vevents = []
++    if fear36_start is not None:
++        vevents.append(_vevent("fear-window36-start@marketmonitor", "FEAR window start (36m)", fear36_start, "Cycle-based forecast window begins"))
++    if fear24_start is not None:
++        vevents.append(_vevent("fear-window24-start@marketmonitor", "FEAR window start (24m)", fear24_start, "Closer approach to FEAR peak"))
++    if peak_f is not None:
++        vevents.append(_vevent("fear-peak@marketmonitor", "FEAR peak (cycle forecast)", peak_f, "Predicted volatility cycle peak"))
++
++    if euph36_start is not None:
++        vevents.append(_vevent("euph-window36-start@marketmonitor", "EUPH window start (36m)", euph36_start, "Cycle-based forecast window begins"))
++    if euph24_start is not None:
++        vevents.append(_vevent("euph-window24-start@marketmonitor", "EUPH window start (24m)", euph24_start, "Closer approach to EUPH trough"))
++    if trough_e is not None:
++        vevents.append(_vevent("euph-trough@marketmonitor", "EUPH trough (cycle forecast)", trough_e, "Predicted volatility cycle trough"))
++
++    ics = "\n".join([
++        "BEGIN:VCALENDAR",
++        "VERSION:2.0",
++        "PRODID:-//MarketMonitor//FearEuphoria//EN",
++        *vevents,
++        "END:VCALENDAR",
++        "",
++    ])
++    cal_ics.write_text(ics, encoding="utf-8")
++
++    return cal_csv, cal_ics
++
++
+ def export_asset_universe_csv(conn, out_path: Optional[Path] = None) -> Path:
+     """
+     Export all observations from the database into a single pivoted CSV file.
+diff -ruN oldroot/app/fear_euphoria.py newroot/app/fear_euphoria.py
+--- oldroot/app/fear_euphoria.py	1970-01-01 00:00:00.000000000 +0000
++++ newroot/app/fear_euphoria.py	2026-01-30 06:57:24.000000000 +0000
+@@ -0,0 +1,335 @@
++from __future__ import annotations
++
++"""Fear / Euphoria program (cycle forecast + confirm triggers).
++
++This module is intentionally lightweight (NumPy/Pandas only).
++
++Concept
++-------
++1) Forecast window (cycle-based):
++   - Use the long-run 8–14y *volatility cycle* phase (vol_wave_10y_phase, amp)
++     from `cycles_monthly.csv`.
++   - Convert phase + estimated period into "months until next FEAR (vol peak)"
++     and "months until next EUPHORIA (vol trough)".
++   - Window flags: within 24m / within 36m.
++
++2) Confirm trigger (event-based): only *inside the window*.
++   - FEAR trigger: volatility spike + trend break + macro risk (DEFCON2/1)
++   - EUPHORIA trigger: very low vol + overextension + momentum deceleration
++
++Outputs
++-------
++Exporter writes:
++  - fear_euphoria_monthly.csv
++  - fear_euphoria_daily.csv (monthly forward-filled to daily, plus trigger flags)
++"""
++
++import math
++from dataclasses import dataclass
++from datetime import date
++from pathlib import Path
++from typing import Optional
++
++import numpy as np
++import pandas as pd
++
++
++TWO_PI = float(2.0 * math.pi)
++
++
++def _circular_distance(a: float, b: float) -> float:
++    """Smallest signed distance from angle a to b (both radians)."""
++    return float(((a - b + math.pi) % TWO_PI) - math.pi)
++
++
++def _rolling_phase_fit(periodic_phase: pd.Series, window: int = 120) -> pd.DataFrame:
++    """Estimate period and fit quality from a rolling linear fit of unwrapped phase.
++
++    Returns a DataFrame with columns:
++      - omega: radians / month
++      - period_months
++      - r2
++    """
++    ph = pd.to_numeric(periodic_phase, errors="coerce")
++    x = np.arange(window, dtype=float)
++    omega = np.full(len(ph), np.nan)
++    per = np.full(len(ph), np.nan)
++    r2 = np.full(len(ph), np.nan)
++
++    arr = ph.to_numpy(dtype=float)
++    for i in range(window - 1, len(arr)):
++        seg = arr[i - window + 1 : i + 1]
++        if np.isnan(seg).any():
++            continue
++        uw = np.unwrap(seg)
++        # Linear fit: y = a*x + b
++        a, b = np.polyfit(x, uw, 1)
++        yhat = a * x + b
++        ss_res = float(np.sum((uw - yhat) ** 2))
++        ss_tot = float(np.sum((uw - float(np.mean(uw))) ** 2))
++        r2_i = 1.0 - (ss_res / ss_tot) if ss_tot > 1e-12 else np.nan
++
++        if not np.isfinite(a) or a <= 0:
++            continue
++        omega[i] = float(a)
++        per_i = TWO_PI / float(a)
++        per[i] = float(per_i)
++        r2[i] = float(r2_i) if np.isfinite(r2_i) else np.nan
++
++    return pd.DataFrame(
++        {
++            "omega": pd.Series(omega, index=ph.index),
++            "period_months": pd.Series(per, index=ph.index),
++            "r2": pd.Series(r2, index=ph.index),
++        }
++    )
++
++
++def build_fear_euphoria_from_cycles_monthly(
++    cycles_monthly: pd.DataFrame,
++    *,
++    phase_col: str = "vol_wave_10y_phase",
++    amp_col: str = "vol_wave_10y_amp",
++    fit_window_months: int = 120,
++    tol_rad: float = math.pi / 10.0,  # ~18deg window around target phase
++) -> pd.DataFrame:
++    """Build forecast windows (months-to-fear/euphoria) from cycles_monthly."""
++    if cycles_monthly is None or cycles_monthly.empty:
++        return pd.DataFrame()
++
++    df = cycles_monthly.copy()
++    if "time" in df.columns:
++        df["time"] = pd.to_datetime(df["time"], errors="coerce")
++        df = df.dropna(subset=["time"]).sort_values("time").set_index("time")
++    else:
++        # assume index
++        df.index = pd.to_datetime(df.index, errors="coerce")
++        df = df.dropna(axis=0, how="any", subset=[]).sort_index()
++
++    ph = pd.to_numeric(df.get(phase_col), errors="coerce")
++    amp = pd.to_numeric(df.get(amp_col), errors="coerce")
++    if ph is None or ph.isna().all():
++        return pd.DataFrame()
++
++    fit = _rolling_phase_fit(ph.fillna(method="ffill"), window=fit_window_months)
++    omega = fit["omega"]
++    period = fit["period_months"]
++    r2 = fit["r2"]
++
++    # Convert phase -> months until target phase (forward time).
++    # FEAR: vol peak ~ phase 0
++    # EUPHORIA: vol trough ~ phase pi
++    target_fear = 0.0
++    target_euph = math.pi
++
++    # Use omega for forward phase advance; require positive omega.
++    omega_pos = omega.where(omega > 0)
++
++    # Forward diff in [0, 2pi)
++    diff_fear = ((target_fear - ph) % TWO_PI)
++    diff_euph = ((target_euph - ph) % TWO_PI)
++
++    months_fear = diff_fear / omega_pos
++    months_euph = diff_euph / omega_pos
++
++    # If we are already close (within tol), treat as "now".
++    dist_fear = ph.apply(lambda v: abs(_circular_distance(float(v), target_fear)) if np.isfinite(v) else np.nan)
++    dist_euph = ph.apply(lambda v: abs(_circular_distance(float(v), target_euph)) if np.isfinite(v) else np.nan)
++    months_fear = months_fear.where(~(dist_fear <= tol_rad), other=0.0)
++    months_euph = months_euph.where(~(dist_euph <= tol_rad), other=0.0)
++
++    # Confidence: amplitude strength + phase-fit quality.
++    amp_med = amp.rolling(120, min_periods=60).median()
++    amp_ratio = amp / amp_med.replace(0.0, np.nan)
++    conf_amp = ((amp_ratio - 0.7) / 0.6).clip(lower=0.0, upper=1.0)
++    conf_fit = r2.clip(lower=0.0, upper=1.0)
++
++    conf = (0.6 * conf_amp.fillna(0.0) + 0.4 * conf_fit.fillna(0.0)).clip(0.0, 1.0)
++
++    out = pd.DataFrame(index=df.index)
++    out["vol_phase"] = ph
++    out["vol_amp"] = amp
++    out["period_months"] = period
++    out["period_years"] = period / 12.0
++    out["phase_fit_r2"] = r2
++    out["months_until_fear"] = months_fear
++    out["months_until_euphoria"] = months_euph
++    out["fear_window_24m"] = (months_fear <= 24).astype(int)
++    out["fear_window_36m"] = (months_fear <= 36).astype(int)
++    out["euphoria_window_24m"] = (months_euph <= 24).astype(int)
++    out["euphoria_window_36m"] = (months_euph <= 36).astype(int)
++    out["confidence"] = conf
++    return out.reset_index().rename(columns={"index": "time"})
++
++
++def _rolling_z(x: pd.Series, win_short: int, win_long: int) -> pd.Series:
++    """Z-score of short-window realized vol vs long-window baseline."""
++    mu = x.rolling(win_long, min_periods=max(30, win_long // 3)).mean()
++    sd = x.rolling(win_long, min_periods=max(30, win_long // 3)).std(ddof=0)
++    z = (x - mu) / sd.replace(0.0, np.nan)
++    return z
++
++
++def compute_daily_triggers(
++    daily_close: pd.Series,
++    daily_state: pd.Series,
++    forecast_daily: pd.DataFrame,
++    *,
++    sma_days: int = 200,
++    vol_days: int = 20,
++    vol_long_days: int = 252,
++    vol_spike_z: float = 1.0,
++    vol_low_z: float = -0.5,
++    overext_pct: float = 0.15,
++    mom_fast_days: int = 20,
++    mom_slow_days: int = 60,
++) -> pd.DataFrame:
++    """Compute FEAR/EUPHORIA confirm triggers on daily data."""
++    s = pd.to_numeric(daily_close, errors="coerce").dropna().sort_index()
++    if s.empty:
++        return pd.DataFrame(index=forecast_daily.index)
++
++    px = s.reindex(forecast_daily.index).ffill()
++    sma = px.rolling(sma_days, min_periods=max(50, sma_days // 3)).mean()
++    trend_break = (px < sma)
++    overext = (px / sma - 1.0)
++    overext_flag = overext > float(overext_pct)
++
++    ret = px.pct_change(fill_method=None)
++    vol = ret.rolling(vol_days, min_periods=max(10, vol_days // 2)).std(ddof=0) * math.sqrt(252)
++    vol_z = _rolling_z(vol, win_short=vol_days, win_long=vol_long_days)
++    vol_spike = vol_z > float(vol_spike_z)
++    vol_low = vol_z < float(vol_low_z)
++
++    mom_fast = px.pct_change(mom_fast_days, fill_method=None)
++    mom_slow = px.pct_change(mom_slow_days, fill_method=None)
++    mom_decel = (mom_slow > 0) & (mom_fast > 0) & (mom_fast < mom_slow)
++
++    st = daily_state.reindex(forecast_daily.index).fillna(method="ffill")
++    macro_risk = st.isin(["DEFCON2", "DEFCON1"])
++
++    fear_window = forecast_daily.get("fear_window_36m", 0).astype(bool)
++    euph_window = forecast_daily.get("euphoria_window_36m", 0).astype(bool)
++
++    fear_base = fear_window & vol_spike & trend_break & macro_risk
++    # Tiered FEAR severity (0-3) only when base trigger is ON.
++    # L1: base trigger
++    # L2: base + (DEFCON1 or stronger vol spike or closer-to-peak)
++    # L3: base + (DEFCON1 and strong vol spike)
++    st_u = st.astype(str).str.upper()
++    is_def1 = st_u.eq('DEFCON1')
++    close_to_peak = pd.to_numeric(forecast_daily.get('months_until_fear'), errors='coerce') <= 12
++    strong_vol = vol_z >= (float(vol_spike_z) + 0.5)
++    vstrong_vol = vol_z >= (float(vol_spike_z) + 1.0)
++    fear_level = (fear_base.astype(int) * 1)
++    fear_level = fear_level + (fear_base & (is_def1 | strong_vol | close_to_peak)).astype(int)
++    fear_level = fear_level + (fear_base & is_def1 & vstrong_vol).astype(int)
++    fear_level = fear_level.clip(lower=0, upper=3)
++    fear_trigger = fear_level > 0
++
++    euph_base = euph_window & vol_low & overext_flag & mom_decel
++    close_to_trough = pd.to_numeric(forecast_daily.get('months_until_euphoria'), errors='coerce') <= 12
++    very_low_vol = vol_z <= (float(vol_low_z) - 0.5)
++    strong_overext = overext >= (float(overext_pct) * 1.5)
++    euphoria_level = (euph_base.astype(int) * 1)
++    euphoria_level = euphoria_level + (euph_base & (very_low_vol | strong_overext | close_to_trough)).astype(int)
++    euphoria_level = euphoria_level + (euph_base & very_low_vol & strong_overext).astype(int)
++    euphoria_level = euphoria_level.clip(lower=0, upper=3)
++    euph_trigger = euphoria_level > 0
++
++    out = pd.DataFrame(index=forecast_daily.index)
++    out["nasdaq_close"] = px
++    out["nasdaq_sma"] = sma
++    out["nasdaq_overext"] = overext
++    out["nasdaq_mom_fast"] = mom_fast
++    out["nasdaq_mom_slow"] = mom_slow
++    out["vol_ann"] = vol
++    out["vol_z"] = vol_z
++    out["trend_break"] = trend_break.astype(int)
++    out["overext_flag"] = overext_flag.astype(int)
++    out["mom_decel"] = mom_decel.astype(int)
++    out["macro_risk"] = macro_risk.astype(int)
++    out["fear_level"] = pd.to_numeric(fear_level, errors='coerce').fillna(0).astype(int)
++    out["euphoria_level"] = pd.to_numeric(euphoria_level, errors='coerce').fillna(0).astype(int)
++    out["fear_trigger"] = fear_trigger.astype(int)
++    out["euphoria_trigger"] = euph_trigger.astype(int)
++    return out
++
++
++@dataclass(frozen=True)
++class FearEuphoriaSnapshot:
++    as_of_date: str
++    months_until_fear: Optional[float]
++    months_until_euphoria: Optional[float]
++    confidence: Optional[float]
++    fear_window_24m: Optional[int]
++    fear_window_36m: Optional[int]
++    euphoria_window_24m: Optional[int]
++    euphoria_window_36m: Optional[int]
++    fear_trigger: Optional[int]
++    euphoria_trigger: Optional[int]
++    fear_level: Optional[int]
++    euphoria_level: Optional[int]
++
++
++def load_fear_euphoria_snapshot(
++    as_of: date,
++    *,
++    data_dir: Optional[Path] = None,
++    csv_name: str = "fear_euphoria_daily.csv",
++) -> Optional[FearEuphoriaSnapshot]:
++    """Load a daily fear/euphoria snapshot for a given date."""
++    base_dir = Path(__file__).resolve().parent.parent
++    data_dir = data_dir or (base_dir / "data")
++    path = data_dir / csv_name
++    if not path.exists():
++        return None
++
++    try:
++        df = pd.read_csv(path)
++    except Exception:
++        return None
++    if df.empty or "date" not in df.columns:
++        return None
++
++    df["date"] = pd.to_datetime(df["date"], errors="coerce")
++    df = df.dropna(subset=["date"]).sort_values("date")
++    if df.empty:
++        return None
++    ts = pd.Timestamp(as_of)
++    df = df[df["date"] <= ts]
++    if df.empty:
++        return None
++    row = df.iloc[-1]
++    return FearEuphoriaSnapshot(
++        as_of_date=str(pd.Timestamp(row["date"]).date()),
++        months_until_fear=_safe_float(row.get("months_until_fear")),
++        months_until_euphoria=_safe_float(row.get("months_until_euphoria")),
++        confidence=_safe_float(row.get("confidence")),
++        fear_window_24m=_safe_int(row.get("fear_window_24m")),
++        fear_window_36m=_safe_int(row.get("fear_window_36m")),
++        euphoria_window_24m=_safe_int(row.get("euphoria_window_24m")),
++        euphoria_window_36m=_safe_int(row.get("euphoria_window_36m")),
++        fear_trigger=_safe_int(row.get("fear_trigger")),
++        euphoria_trigger=_safe_int(row.get("euphoria_trigger")),
++        fear_level=_safe_int(row.get("fear_level")),
++        euphoria_level=_safe_int(row.get("euphoria_level")),
++    )
++
++
++def _safe_float(v) -> Optional[float]:
++    try:
++        if v is None or (isinstance(v, float) and math.isnan(v)) or v == "":
++            return None
++        return float(v)
++    except Exception:
++        return None
++
++
++def _safe_int(v) -> Optional[int]:
++    try:
++        if v is None or v == "":
++            return None
++        return int(float(v))
++    except Exception:
++        return None
+diff -ruN oldroot/app/notifier.py newroot/app/notifier.py
+--- oldroot/app/notifier.py	2026-01-30 01:13:35.000000000 +0000
++++ newroot/app/notifier.py	2026-01-30 06:58:18.000000000 +0000
+@@ -212,6 +212,43 @@
+         except Exception:
+             pass
+ 
++    # Fear / Euphoria (cycle-forecast + trigger)
++    fe = (result.reasons or {}).get("fear_euphoria")
++    if isinstance(fe, dict) and fe:
++        try:
++            mu_f = fe.get("months_until_fear")
++            mu_e = fe.get("months_until_euphoria")
++            conf = fe.get("confidence")
++            f_tr = fe.get("fear_trigger")
++            f_lvl = fe.get("fear_level")
++            e_tr = fe.get("euphoria_trigger")
++            e_lvl = fe.get("euphoria_level")
++            f_w36 = fe.get("fear_window_36m")
++            e_w36 = fe.get("euphoria_window_36m")
++
++            def _fmt_months(v):
++                if v is None:
++                    return "N/A"
++                try:
++                    v = float(v)
++                except Exception:
++                    return "N/A"
++                if v <= 0.1:
++                    return "now"
++                return f"{v:.1f}m"
++
++            lines = []
++            lines.append(f"FEAR window(<=36m): {'YES' if int(f_w36 or 0) else 'no'} | ETA {_fmt_months(mu_f)} | level {int(f_lvl or 0)} | trigger {'ON' if int(f_tr or 0) else 'off'}")
++            lines.append(f"EUPH window(<=36m): {'YES' if int(e_w36 or 0) else 'no'} | ETA {_fmt_months(mu_e)} | level {int(e_lvl or 0)} | trigger {'ON' if int(e_tr or 0) else 'off'}")
++            if conf is not None:
++                try:
++                    lines.append(f"Confidence: {float(conf) * 100.0:.0f}%")
++                except Exception:
++                    pass
++            fields.append({"name": "Fear / Euphoria", "value": "\n".join(lines), "inline": False})
++        except Exception:
++            pass
++
+     duration_sec = result.reasons.get("duration_sec")
+     if duration_sec is not None:
+         fields.append({"name": "Compute Time", "value": f"{duration_sec:.1f}s", "inline": True})
+diff -ruN oldroot/app/portfolio.py newroot/app/portfolio.py
+--- oldroot/app/portfolio.py	2026-01-30 01:13:35.000000000 +0000
++++ newroot/app/portfolio.py	2026-01-30 06:57:59.000000000 +0000
+@@ -10,6 +10,8 @@
+ import pandas as pd
+ 
+ from app import db
++from app.cycles import load_cycle_snapshot
++from app.fear_euphoria import load_fear_euphoria_snapshot
+ from app.settings import get_settings
+ 
+ 
+@@ -274,6 +276,64 @@
+     }
+     macro_mult = float(mult_map.get(str(macro_state or "").upper(), 1.0))
+ 
++    # Optional: cycle-based risk scaling (global risk appetite multiplier).
++    cycle_mult = 1.0
++    cycle_diag: Dict[str, Optional[float]] = {}
++    if bool(getattr(settings, "portfolio_use_cycles", False)):
++        snap = load_cycle_snapshot(
++            as_of,
++            csv_name=str(getattr(settings, "portfolio_cycles_csv_name", "cycles_daily.csv") or "cycles_daily.csv"),
++        )
++        if snap is not None:
++            cycle_mult = float(snap.risk_multiplier or 1.0)
++            cycle_diag = {
++                "risk_multiplier": cycle_mult,
++                "price_cycle_z": snap.price_cycle_z,
++                "vol_z": snap.vol_z,
++                "wave_7y": snap.wave_7y,
++                "wave_7y_phase": snap.wave_7y_phase,
++                "vol_wave_10y": snap.vol_wave_10y,
++                "vol_wave_10y_phase": snap.vol_wave_10y_phase,
++                "as_of_date": snap.as_of_date,
++            }
++
++    # Optional: Fear/Euphoria overlay (only FEAR reduces risk + cap).
++    fe_diag: Dict[str, Optional[float]] = {}
++    fear_risk_mult = 1.0
++    fear_cap = None
++    if bool(getattr(settings, "portfolio_use_fear_euphoria", True)):
++        try:
++            fe = load_fear_euphoria_snapshot(as_of)
++        except Exception:
++            fe = None
++        if fe is not None:
++            fe_diag = {
++                "months_until_fear": fe.months_until_fear,
++                "months_until_euphoria": fe.months_until_euphoria,
++                "confidence": fe.confidence,
++                "fear_window_36m": fe.fear_window_36m,
++                "euphoria_window_36m": fe.euphoria_window_36m,
++                "fear_trigger": fe.fear_trigger,
++                "euphoria_trigger": fe.euphoria_trigger,
++                "as_of_date": fe.as_of_date,
++            }
++            lvl = int(fe.fear_level or 0) if (fe.fear_level is not None) else (1 if int(fe.fear_trigger or 0) == 1 else 0)
++            if lvl > 0:
++                # Tiered defense levels (1-3). Default values are in app/settings.py.
++                if lvl == 1:
++                    fear_risk_mult = float(getattr(settings, "portfolio_fear_level1_risk_multiplier", 0.85))
++                    fear_cap = float(getattr(settings, "portfolio_fear_level1_leverage_cap", 1.2))
++                elif lvl == 2:
++                    fear_risk_mult = float(getattr(settings, "portfolio_fear_level2_risk_multiplier", 0.70))
++                    fear_cap = float(getattr(settings, "portfolio_fear_level2_leverage_cap", 1.0))
++                else:
++                    fear_risk_mult = float(getattr(settings, "portfolio_fear_level3_risk_multiplier", 0.50))
++                    fear_cap = float(getattr(settings, "portfolio_fear_level3_leverage_cap", 0.6))
++
++                fe_diag["fear_level"] = lvl
++                if fear_cap and fear_cap > 0:
++                    cap = min(cap, fear_cap)
++
+     weights_raw: Dict[str, float] = {}
+     diagnostics: Dict[str, Dict] = {}
+     need = max(ma_win, vol_win + 1)
+@@ -311,7 +371,7 @@
+             if w > cap:
+                 w = cap
+             if asset_id in risk_assets:
+-                w *= macro_mult
++                w *= (macro_mult * float(cycle_mult) * float(fear_risk_mult))
+ 
+         weights_raw[asset_id] = float(max(0.0, w))
+         diagnostics[asset_id] = {
+@@ -323,6 +383,12 @@
+             "raw_weight": weights_raw[asset_id],
+         }
+ 
++    if cycle_diag:
++        diagnostics["__cycles__"] = cycle_diag
++
++    if fe_diag:
++        diagnostics["__fear_euphoria__"] = fe_diag
++
+     gross = float(sum(weights_raw.values()))
+     scale = 1.0
+     if gross > cap and gross > 0:
+diff -ruN oldroot/app/settings.py newroot/app/settings.py
+--- oldroot/app/settings.py	2026-01-30 01:13:35.000000000 +0000
++++ newroot/app/settings.py	2026-01-30 06:57:24.000000000 +0000
+@@ -89,6 +89,25 @@
+     portfolio_macro_multiplier_defcon2: float = Field(1.0, env="PORTFOLIO_MACRO_MULTIPLIER_DEFCON2")
+     portfolio_macro_multiplier_defcon1: float = Field(1.0, env="PORTFOLIO_MACRO_MULTIPLIER_DEFCON1")
+ 
++    # Optional: cycle-based risk scaling (uses exported ./data/cycles_daily.csv)
++    portfolio_use_cycles: bool = Field(False, env="PORTFOLIO_USE_CYCLES")
++    portfolio_cycles_csv_name: str = Field("cycles_daily.csv", env="PORTFOLIO_CYCLES_CSV_NAME")
++
++    # Optional: Fear/Euphoria overlay (uses exported ./data/fear_euphoria_daily.csv)
++    # - Forecast window is cycle-based (months_until_fear/euphoria)
++    # - Confirm trigger flags are event-based (vol spike + trend break + DEFCON2/1 for fear)
++    portfolio_use_fear_euphoria: bool = Field(True, env="PORTFOLIO_USE_FEAR_EUPHORIA")
++    portfolio_fear_leverage_cap: float = Field(1.0, env="PORTFOLIO_FEAR_LEVERAGE_CAP")
++    portfolio_fear_risk_multiplier: float = Field(0.6, env="PORTFOLIO_FEAR_RISK_MULTIPLIER")
++
++    # Tiered FEAR defense parameters (used when fear_level=1/2/3)
++    portfolio_fear_level1_leverage_cap: float = Field(1.2, env="PORTFOLIO_FEAR_L1_LEVERAGE_CAP")
++    portfolio_fear_level2_leverage_cap: float = Field(1.0, env="PORTFOLIO_FEAR_L2_LEVERAGE_CAP")
++    portfolio_fear_level3_leverage_cap: float = Field(0.6, env="PORTFOLIO_FEAR_L3_LEVERAGE_CAP")
++    portfolio_fear_level1_risk_multiplier: float = Field(0.85, env="PORTFOLIO_FEAR_L1_RISK_MULTIPLIER")
++    portfolio_fear_level2_risk_multiplier: float = Field(0.70, env="PORTFOLIO_FEAR_L2_RISK_MULTIPLIER")
++    portfolio_fear_level3_risk_multiplier: float = Field(0.50, env="PORTFOLIO_FEAR_L3_RISK_MULTIPLIER")
++
+     # Dynamic allocation defaults for fixed model (see app/engine.py).
+     equity_weight_normal: float = Field(0.0, env="EQUITY_WEIGHT_NORMAL")
+     equity_weight_defcon2_trend_up: float = Field(0.5, env="EQUITY_WEIGHT_DEFCON2_TREND_UP")
+Binary files oldroot/scripts/__pycache__/backfill_asset_universe_to_db.cpython-311.pyc and newroot/scripts/__pycache__/backfill_asset_universe_to_db.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/backfill_assets_from_csv.cpython-311.pyc and newroot/scripts/__pycache__/backfill_assets_from_csv.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/backfill_from_csv.cpython-311.pyc and newroot/scripts/__pycache__/backfill_from_csv.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/backtest_daily_states.cpython-311.pyc and newroot/scripts/__pycache__/backtest_daily_states.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/build_portfolio_daily.cpython-311.pyc and newroot/scripts/__pycache__/build_portfolio_daily.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/check_routes.cpython-311.pyc and newroot/scripts/__pycache__/check_routes.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/export_daily_states_csv.cpython-311.pyc and newroot/scripts/__pycache__/export_daily_states_csv.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/init_db.cpython-311.pyc and newroot/scripts/__pycache__/init_db.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/normalize_asset_universe_csv.cpython-311.pyc and newroot/scripts/__pycache__/normalize_asset_universe_csv.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/rebuild_db_from_asset_universe.cpython-311.pyc and newroot/scripts/__pycache__/rebuild_db_from_asset_universe.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/restore_daily_states_from_csv.cpython-311.pyc and newroot/scripts/__pycache__/restore_daily_states_from_csv.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/run_daily.cpython-311.pyc and newroot/scripts/__pycache__/run_daily.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/run_scheduled_job.cpython-311.pyc and newroot/scripts/__pycache__/run_scheduled_job.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/sync_db_from_asset_universe.cpython-311.pyc and newroot/scripts/__pycache__/sync_db_from_asset_universe.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/test_discord_webhook.cpython-311.pyc and newroot/scripts/__pycache__/test_discord_webhook.cpython-311.pyc differ
+Binary files oldroot/scripts/__pycache__/watcher.cpython-311.pyc and newroot/scripts/__pycache__/watcher.cpython-311.pyc differ
+diff -ruN oldroot/scripts/run_daily.py newroot/scripts/run_daily.py
+--- oldroot/scripts/run_daily.py	2026-01-30 01:13:35.000000000 +0000
++++ newroot/scripts/run_daily.py	2026-01-30 06:58:56.000000000 +0000
+@@ -10,6 +10,9 @@
+ from app import db
+ from app.exporter import (
+     backup_daily_states_csv,
++    export_cycles_csv,
++    export_fear_euphoria_csv,
++    export_fear_euphoria_calendar,
+     export_asset_universe_csv,
+     export_daily_states_csv,
+     export_nasdaq_1d_csv,
+@@ -20,6 +23,7 @@
+ from app.job_control import job_lock, read_last_run_ts, write_last_run_ts
+ from app.notifier import notify
+ from app.settings import get_settings
++from app.fear_euphoria import load_fear_euphoria_snapshot
+ 
+ logger = logging.getLogger("warroom.job")
+ 
+@@ -106,13 +110,38 @@
+                     export_webhook_records_csv(conn)
+                     export_daily_states_csv(conn)
+                     export_nasdaq_1d_csv(conn)
++                    export_cycles_csv(conn)
++                    export_fear_euphoria_csv(conn)
++                    export_fear_euphoria_calendar(conn)
+                     export_asset_universe_csv(conn)
++                    # Portfolio export depends on cycle / fear-euphoria snapshots.
+                     export_portfolio_recent_csv(conn, days=window_days, end_date=end_date)
+                 except Exception as e:
+                     logger.error(f"Export failed but continuing to notify: {e}")
+                 
+                 # 3. 디스코드 알림 발송
+                 if result:
++                    # Attach Fear/Euphoria snapshot (exported just above) to the reasons for Discord/site.
++                    try:
++                        fe = load_fear_euphoria_snapshot(result.as_of_date)
++                        if fe is not None:
++                            result.reasons = dict(result.reasons or {})
++                            result.reasons["fear_euphoria"] = {
++                                "months_until_fear": fe.months_until_fear,
++                                "months_until_euphoria": fe.months_until_euphoria,
++                                "confidence": fe.confidence,
++                                "fear_window_24m": fe.fear_window_24m,
++                                "fear_window_36m": fe.fear_window_36m,
++                                "euphoria_window_24m": fe.euphoria_window_24m,
++                                "euphoria_window_36m": fe.euphoria_window_36m,
++                                "fear_trigger": fe.fear_trigger,
++                                "fear_level": fe.fear_level,
++                                "euphoria_level": fe.euphoria_level,
++                                "euphoria_trigger": fe.euphoria_trigger,
++                            }
++                    except Exception:
++                        logger.exception("Failed to load fear/euphoria snapshot")
++
+                     # NOTE: Discord 전송 실패는 전체 작업 실패로 취급하지 않는다.
+                     try:
+                         sent = notify(result)
+diff -ruN oldroot/site/app.js newroot/site/app.js
+--- oldroot/site/app.js	2026-01-30 01:13:35.000000000 +0000
++++ newroot/site/app.js	2026-01-30 07:01:32.000000000 +0000
+@@ -11,6 +11,8 @@
+   nasdaq1d: "../data/nasdaq_dly_ixic_1d.csv",
+   states: "../data/market_states_daily.csv",
+   portfolio: "../data/portfolio_daily.csv",
++  fear: "../data/fear_euphoria_daily.csv",
++  fearCal: "../data/fear_euphoria_calendar.csv",
+ };
+ 
+ const PAGE_SIZE = 200;
+@@ -245,6 +247,21 @@
+           port && port.cash !== null && port.cash !== undefined ? `${fmtNum(port.cash * 100.0, 1)}%` : "—";
+         const portText = port && port.topText ? String(port.topText) : "—";
+         const equityText = equity === null || equity === undefined ? "—" : `${fmtNum(equity * 100.0, 1)}%`;
++        const fe = state.fearByDate ? state.fearByDate.get(d) : null;
++        const feLines = [];
++        if (fe) {
++          const muF = fe.muFear === null || fe.muFear === undefined ? "—" : `${fmtNum(fe.muFear, 1)}m`;
++          const muE = fe.muEuph === null || fe.muEuph === undefined ? "—" : `${fmtNum(fe.muEuph, 1)}m`;
++          const confText = fe.conf === null || fe.conf === undefined ? "—" : `${fmtNum(fe.conf * 100.0, 0)}%`;
++          const fTrig = fe.fearTrig ? "ON" : "off";
++          const eTrig = fe.euphTrig ? "ON" : "off";
++          const fLvl = Number(fe.fearLvl || 0);
++          const eLvl = Number(fe.euphLvl || 0);
++          feLines.push(`<div style="margin-top:6px;"><b>Fear/Euph</b></div>`);
++          feLines.push(`<div>FEAR ETA: <b>${muF}</b> (level: <b>L${fLvl}</b>, trigger: <b>${fTrig}</b>)</div>`);
++          feLines.push(`<div>EUPH ETA: <b>${muE}</b> (level: <b>L${eLvl}</b>, trigger: <b>${eTrig}</b>)</div>`);
++          feLines.push(`<div>Confidence: <b>${confText}</b></div>`);
++        }
+         return [
+           `<div style="font-weight:700;margin-bottom:6px;">${d}</div>`,
+           `<div>NASDAQ: <b>${fmtNum(close, 2)}</b></div>`,
+@@ -255,6 +272,7 @@
+           `<div>Action: <b>${action || "—"}</b></div>`,
+           `<div>Gross: <b>${grossText}</b> / Cash: <b>${cashText}</b></div>`,
+           `<div>Portfolio: <b>${portText}</b></div>`,
++          ...feLines,
+         ].join("");
+       },
+     },
+@@ -493,7 +511,19 @@
+     const close = state.closeByDate.get(r.date);
+     if (onlyTradingDays && close === undefined) continue;
+ 
+-    const triggers = r.triggers || "";
++    let triggers = r.triggers || "";
++    const fe = state.fearByDate ? state.fearByDate.get(r.date) : null;
++    if (fe) {
++      const muF = fe.muFear === null || fe.muFear === undefined ? "—" : `${fmtNum(fe.muFear, 1)}m`;
++      const muE = fe.muEuph === null || fe.muEuph === undefined ? "—" : `${fmtNum(fe.muEuph, 1)}m`;
++      const confText = fe.conf === null || fe.conf === undefined ? "—" : `${fmtNum(fe.conf * 100.0, 0)}%`;
++      const tag = [];
++      if (fe.fearTrig) tag.push("FEAR!");
++      if (fe.euphTrig) tag.push("EUPH!");
++      if (!tag.length) tag.push(`FEAR ${muF}`, `EUPH ${muE}`, `C ${confText}`);
++      const addon = tag.join(" ");
++      triggers = triggers ? `${triggers} | ${addon}` : addon;
++    }
+     if (q && !triggers.toLowerCase().includes(q)) continue;
+ 
+     const port = state.portfolioByDate ? state.portfolioByDate.get(r.date) : null;
+@@ -639,6 +669,61 @@
+   }
+ }
+ 
++function renderFearCalendar(state) {
++  const el = state.ui?.fearCalendar;
++  const metaEl = state.ui?.fearCalendarMeta;
++  if (!el) return;
++  const rows = state.fearCalRows || [];
++  if (!rows.length) {
++    el.innerHTML = '<div class="muted">No fear/euphoria calendar data. (Missing data/fear_euphoria_calendar.csv)</div>';
++    if (metaEl) metaEl.textContent = '';
++    return;
++  }
++
++  // Show next 48 months starting from the latest as-of month.
++  let asOf = rows[rows.length - 1].asOf || '';
++  // Some rows repeat asOf; find the first non-empty.
++  for (let i = rows.length - 1; i >= 0; i--) {
++    if (rows[i].asOf) { asOf = rows[i].asOf; break; }
++  }
++  const start = asOf || rows[0].month;
++  const startP = start.slice(0, 7);
++
++  const pick = rows.filter(r => r.month.slice(0,7) >= startP).slice(0, 48);
++  const grid = document.createElement('div');
++  grid.className = 'calendar-grid';
++
++  for (const r of pick) {
++    const cell = document.createElement('div');
++    const tagFear = r.f36;
++    const tagE = r.e36;
++    cell.className = 'cal-cell' + (tagFear && tagE ? ' both' : '');
++
++    const m = r.month.slice(0,7);
++    const title = document.createElement('div');
++    title.className = 'm';
++    title.textContent = m;
++    cell.appendChild(title);
++
++    const badge = document.createElement('span');
++    badge.className = 'tag ' + (tagFear && tagE ? 'none' : (tagFear ? 'fear' : (tagE ? 'euph' : 'none')));
++    badge.textContent = tagFear && tagE ? 'FEAR+EUPH' : (tagFear ? 'FEAR' : (tagE ? 'EUPH' : 'NONE'));
++    cell.appendChild(badge);
++
++    grid.appendChild(cell);
++  }
++
++  el.innerHTML = '';
++  el.appendChild(grid);
++
++  const last = rows[rows.length - 1];
++  const parts = [];
++  if (last.asOf) parts.push(`as-of ${last.asOf.slice(0,7)}`);
++  if (last.fearPeak) parts.push(`fear peak ~${last.fearPeak.slice(0,7)}`);
++  if (last.euphTrough) parts.push(`euph trough ~${last.euphTrough.slice(0,7)}`);
++  if (metaEl) metaEl.textContent = parts.join(' · ');
++}
++
+ function renderAll(state) {
+   const enabledStates = getSelectedStates();
+   const clamped = clampRange(state.minDate, state.maxDate, state.ui.start.value, state.ui.end.value);
+@@ -657,6 +742,7 @@
+ 
+   const focusDate = state.selectedDate || clamped.endDate;
+   renderPortfolioPanel(state, focusDate);
++  renderFearCalendar(state);
+ }
+ 
+ function wireUi(state) {
+@@ -934,6 +1020,50 @@
+   return out;
+ }
+ 
++function normalizeFearCalRows(rows) {
++  const out = [];
++  for (const r of rows) {
++    const m = String(r.month_end || r.month || "").trim();
++    if (!m) continue;
++    const label = String(r.label || "NONE").trim();
++    const f36 = Number(r.fear_window_36m) === 1;
++    const e36 = Number(r.euphoria_window_36m) === 1;
++    const asOf = String(r.as_of_month_end || "").trim();
++    const fearPeak = String(r.fear_peak_month_end || "").trim();
++    const euphTrough = String(r.euphoria_trough_month_end || "").trim();
++    out.push({ month: m, label, f36, e36, asOf, fearPeak, euphTrough });
++  }
++  out.sort((a, b) => (a.month < b.month ? -1 : 1));
++  return out;
++}
++
++function normalizeFearRows(rows) {
++  const out = [];
++  for (const r of rows) {
++    const date = String(r.time || r.date || r.as_of_date || "").trim();
++    if (!date) continue;
++    const muFear = Number(r.months_until_fear);
++    const muEuph = Number(r.months_until_euphoria);
++    const conf = Number(r.confidence);
++    const fearTrig = Number(r.fear_trigger) === 1;
++    const euphTrig = Number(r.euphoria_trigger) === 1;
++    const fearLvl = Number(r.fear_level);
++    const euphLvl = Number(r.euphoria_level);
++    out.push({
++      date,
++      muFear: Number.isFinite(muFear) ? muFear : null,
++      muEuph: Number.isFinite(muEuph) ? muEuph : null,
++      conf: Number.isFinite(conf) ? conf : null,
++      fearTrig,
++      euphTrig,
++      fearLvl: Number.isFinite(fearLvl) ? fearLvl : 0,
++      euphLvl: Number.isFinite(euphLvl) ? euphLvl : 0,
++    });
++  }
++  out.sort((a, b) => (a.date < b.date ? -1 : 1));
++  return out;
++}
++
+ function buildMaps(state) {
+   state.closeByDate = new Map();
+   for (const p of state.nasdaqPoints) state.closeByDate.set(p.date, p.close);
+@@ -954,6 +1084,9 @@
+   state.portfolioByDate = new Map();
+   for (const r of state.portfolioRows || []) state.portfolioByDate.set(r.date, r);
+ 
++  state.fearByDate = new Map();
++  for (const r of state.fearRows || []) state.fearByDate.set(r.date, r);
++
+   // For accurate click-to-date mapping, use the daily state calendar (not only trading days).
+   state.statePoints = state.stateRows.map((r) => ({ date: r.date, ms: toUtcMs(r.date) }));
+ 
+@@ -986,18 +1119,24 @@
+ 
+ async function loadFromDefaultPaths(state) {
+   setLoadStatus("Loading CSVs...");
+-  const [nasdaqText, statesText, portfolioText] = await Promise.all([
++  const [nasdaqText, statesText, portfolioText, fearText, fearCalText] = await Promise.all([
+     fetchText(DEFAULT_PATHS.nasdaq1d),
+     fetchText(DEFAULT_PATHS.states),
+     fetchTextOptional(DEFAULT_PATHS.portfolio),
++    fetchTextOptional(DEFAULT_PATHS.fear),
++    fetchTextOptional(DEFAULT_PATHS.fearCal),
+   ]);
+ 
+   const nasdaqRows = parseCsv(nasdaqText);
+   const statesRows = parseCsv(statesText);
+   const portfolioRows = portfolioText ? parseCsv(portfolioText) : [];
++  const fearRows = fearText ? parseCsv(fearText) : [];
++  const fearCalRows = fearCalText ? parseCsv(fearCalText) : [];
+   state.nasdaqPoints = normalizeNasdaqRows(nasdaqRows);
+   state.stateRows = normalizeStateRows(statesRows);
+   state.portfolioRows = normalizePortfolioRows(portfolioRows);
++  state.fearRows = normalizeFearRows(fearRows);
++  state.fearCalRows = normalizeFearCalRows(fearCalRows);
+   buildMaps(state);
+   syncDateLimits(state);
+   ensureLatestVisible(state);
+@@ -1035,10 +1174,12 @@
+     nasdaqPoints: [],
+     stateRows: [],
+     portfolioRows: [],
++    fearRows: [],
+     closeByDate: new Map(),
+     stateByDate: new Map(),
+     scoreByDate: new Map(),
+     portfolioByDate: new Map(),
++    fearByDate: new Map(),
+     minDate: "1970-01-01",
+     maxDate: "1970-01-01",
+     ui: {
+@@ -1055,6 +1196,8 @@
+       fileNasdaq: document.getElementById("fileNasdaq"),
+       fileStates: document.getElementById("fileStates"),
+       filePortfolio: document.getElementById("filePortfolio"),
++      fearCalendar: document.getElementById("fearCalendar"),
++      fearCalendarMeta: document.getElementById("fearCalendarMeta"),
+       portfolioDate: document.getElementById("portfolioDate"),
+       portfolioMeta: document.getElementById("portfolioMeta"),
+       portfolioWeights: document.getElementById("portfolioWeights"),
+diff -ruN oldroot/site/index.html newroot/site/index.html
+--- oldroot/site/index.html	2026-01-30 01:13:35.000000000 +0000
++++ newroot/site/index.html	2026-01-30 07:01:32.000000000 +0000
+@@ -110,6 +110,19 @@
+         </section>
+       </section>
+ 
++      
++
++      <section class="card" id="cardFearCalendar">
++        <div class="card-head">
++          <div>
++            <h2>Fear/Euphoria Forecast Calendar</h2>
++            <p class="muted">Month-level cycle forecast windows (anchored to the latest forecast). <a href="../data/fear_euphoria_forecast.ics">Download .ics</a></p>
++          </div>
++        </div>
++        <div class="calendar" id="fearCalendar"></div>
++        <div class="muted small" id="fearCalendarMeta"></div>
++      </section>
++
+       <section class="card">
+         <div class="card-head">
+           <div>
+diff -ruN oldroot/site/styles.css newroot/site/styles.css
+--- oldroot/site/styles.css	2026-01-30 01:13:35.000000000 +0000
++++ newroot/site/styles.css	2026-01-30 07:01:32.000000000 +0000
+@@ -498,3 +498,16 @@
+   gap: 12px;
+   align-items: center;
+ }
++
++
++/* Fear/Euphoria calendar */
++.calendar { padding: 10px 14px 14px; }
++.calendar-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 6px; }
++.cal-cell { border: 1px solid rgba(21, 19, 18, 0.12); border-radius: 10px; padding: 8px 8px 7px; background: rgba(255,255,255,0.9); }
++.cal-cell .m { font-size: 12px; font-weight: 700; color: rgba(21, 19, 18, 0.82); }
++.cal-cell .tag { margin-top: 4px; font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 999px; display: inline-block; }
++.cal-cell .tag.fear { background: rgba(231, 76, 60, 0.14); color: rgba(231, 76, 60, 0.95); }
++.cal-cell .tag.euph { background: rgba(46, 204, 113, 0.14); color: rgba(46, 204, 113, 0.95); }
++.cal-cell .tag.none { background: rgba(21, 19, 18, 0.08); color: rgba(21, 19, 18, 0.7); }
++.cal-cell.both { box-shadow: inset 0 0 0 2px rgba(155, 89, 182, 0.35); }
++.small { font-size: 12px; }

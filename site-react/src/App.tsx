@@ -16,13 +16,7 @@ import {
 import { format, parseISO, subYears, endOfWeek, endOfMonth } from "date-fns";
 import { useWarRoomData } from "@/hooks/useWarRoomData";
 import { cn } from "@/lib/utils";
-import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
-import Search from "lucide-react/dist/esm/icons/search.js";
-import Filter from "lucide-react/dist/esm/icons/filter.js";
-import Maximize2 from "lucide-react/dist/esm/icons/maximize-2.js";
-import X from "lucide-react/dist/esm/icons/x.js";
-import RotateCcw from "lucide-react/dist/esm/icons/rotate-ccw.js";
-import Languages from "lucide-react/dist/esm/icons/languages.js";
+import { RefreshCw, Search, Filter, Maximize2, X, RotateCcw, Languages } from "lucide-react";
 import type { MarketStateRow } from "@/types";
 
 const STATE_COLORS = {
@@ -75,6 +69,10 @@ const TRANSLATIONS = {
     nasdaqClose: "NASDAQ Close",
     portfolio: "Portfolio",
     from: "from",
+    cyclesTitle: "Cycles",
+    cyclesSub: "Vol/price long-run cycles, with Fear/Euphoria zones",
+    signals: "Signals",
+    phases: "Phases",
   },
   ko: {
     headerTitle: "나스닥 + 시장 상태 감지",
@@ -113,6 +111,10 @@ const TRANSLATIONS = {
     nasdaqClose: "나스닥 종가",
     portfolio: "포트폴리오",
     from: "데이터 기준:",
+    cyclesTitle: "사이클",
+    cyclesSub: "가격/변동성 장기 사이클과 공포·환희 구간",
+    signals: "신호",
+    phases: "위상",
   },
 };
 
@@ -247,6 +249,7 @@ export default function App() {
   
   // Popup State
   const [showPopup, setShowPopup] = useState(false);
+  const [cyclesView, setCyclesView] = useState<"signals" | "phases">("signals");
   const [showDetailPopup, setShowDetailPopup] = useState(false);
   const [dontShowToday, setDontShowToday] = useState(false);
 
@@ -360,6 +363,50 @@ export default function App() {
     return { ...data, states: newStates };
   }, [data, period]);
 
+
+  const fearMap = useMemo(() => {
+    const m = new Map<string, any>();
+    (data?.fearEuphoria || []).forEach((r) => {
+      if (r.date) m.set(r.date, r);
+    });
+    return m;
+  }, [data?.fearEuphoria]);
+
+  const cyclesChart = useMemo(() => {
+    const cycles = data?.cycles || [];
+    if (!cycles || cycles.length === 0) return { data: [], fearSpans: [], euphSpans: [] };
+    const within = cycles.filter((r) => r.date >= dateRange.start && r.date <= dateRange.end);
+    const step = Math.max(1, Math.ceil(within.length / 1500));
+    const sampled = within.filter((_, i) => i % step === 0).map((r) => {
+      const fe = fearMap.get(r.date);
+      return {
+        ...r,
+        fear_level: fe?.fear_level ?? null,
+        euphoria_level: fe?.euphoria_level ?? null,
+      };
+    });
+
+    const spans = (key: "fear_level" | "euphoria_level") => {
+      const out: { x1: string; x2: string }[] = [];
+      let start: string | null = null;
+      let prev: string | null = null;
+      for (const pt of sampled as any[]) {
+        const on = (pt[key] ?? 0) > 0;
+        if (on && start === null) start = pt.date;
+        if (!on && start !== null) {
+          out.push({ x1: start, x2: prev ?? start });
+          start = null;
+        }
+        prev = pt.date;
+      }
+      if (start !== null) out.push({ x1: start, x2: prev ?? start });
+      return out;
+    };
+
+    return { data: sampled, fearSpans: spans("fear_level"), euphSpans: spans("euphoria_level") };
+  }, [data?.cycles, dateRange.start, dateRange.end, fearMap]);
+
+
   // Filter Data
   const filteredRows = useMemo(() => {
     const sourceData = aggregatedData;
@@ -391,7 +438,27 @@ export default function App() {
         return text.includes(lower);
       });
     }
-    return rows;
+    
+
+    // Append Fear/Euphoria forecast snapshot into triggers (if available)
+    rows = rows.map((r) => {
+      const fe = fearMap.get(r.date);
+      if (!fe) return r;
+      const fearEta = fe.months_until_fear ?? null;
+      const euphEta = fe.months_until_euphoria ?? null;
+      const conf = fe.confidence ?? null;
+      const fearLv = fe.fear_level ?? 0;
+      const euphLv = fe.euphoria_level ?? 0;
+      const fearOn = fe.fear_trigger ? "ON" : "off";
+      const euphOn = fe.euphoria_trigger ? "ON" : "off";
+      const parts: string[] = [];
+      if (fearEta !== null) parts.push(`FEAR ETA: ${Math.round(fearEta)}m (L${fearLv}, trigger ${fearOn})`);
+      if (euphEta !== null) parts.push(`EUPH ETA: ${Math.round(euphEta)}m (L${euphLv}, trigger ${euphOn})`);
+      if (conf !== null) parts.push(`Confidence: ${Math.round(conf * 100)}%`);
+      const extra = parts.length ? " | " + parts.join(" · ") : "";
+      return { ...r, triggers: (r.triggers || "") + extra };
+    });
+return rows;
   }, [
     aggregatedData,
     data,
@@ -1227,6 +1294,86 @@ export default function App() {
                 </div>
               </div>
             </section>
+
+
+
+            {/* Cycles (Fear/Euphoria + long-run cycle) */}
+            <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 relative group transition-all hover:shadow-md">
+              <div className="flex flex-wrap items-center justify-between mb-4 gap-3">
+                <div>
+                  <h2 className="text-lg font-bold text-slate-900">{t.cyclesTitle}</h2>
+                  <p className="text-slate-400 text-xs">{t.cyclesSub}</p>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className={cn("font-semibold", cyclesView === "signals" ? "text-slate-900" : "text-slate-400")}>
+                    {t.signals}
+                  </span>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="sr-only"
+                      checked={cyclesView === "phases"}
+                      onChange={(e) => setCyclesView(e.target.checked ? "phases" : "signals")}
+                      aria-label="Toggle cycles view"
+                    />
+                    <span
+                      className={cn(
+                        "inline-flex h-5 w-10 items-center rounded-full transition-colors",
+                        cyclesView === "phases" ? "bg-slate-900" : "bg-slate-200"
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "h-4 w-4 rounded-full bg-white shadow transition-transform",
+                          cyclesView === "phases" ? "translate-x-5" : "translate-x-1"
+                        )}
+                      />
+                    </span>
+                  </label>
+                  <span className={cn("font-semibold", cyclesView === "phases" ? "text-slate-900" : "text-slate-400")}>
+                    {t.phases}
+                  </span>
+                </div>
+              </div>
+
+              {(!data?.cycles || data.cycles.length === 0) ? (
+                <div className="text-sm text-slate-500">
+                  No cycles data loaded (expected: <span className="font-mono">data/cycles_daily.csv</span>)
+                </div>
+              ) : (
+                <div className="h-[320px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={cyclesChart.data}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                      <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={30} />
+                      <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
+                      <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
+                      <Tooltip />
+                      {cyclesChart.fearSpans.map((s, i) => (
+                        <ReferenceArea key={"f"+i} x1={s.x1} x2={s.x2} yAxisId="left" fill="rgba(239,68,68,0.10)" strokeOpacity={0} />
+                      ))}
+                      {cyclesChart.euphSpans.map((s, i) => (
+                        <ReferenceArea key={"e"+i} x1={s.x1} x2={s.x2} yAxisId="left" fill="rgba(34,197,94,0.10)" strokeOpacity={0} />
+                      ))}
+
+                      {cyclesView === "signals" ? (
+                        <>
+                          <Line yAxisId="left" type="monotone" dataKey="wave_7y" name="Price wave (5–9y)" dot={false} stroke="#0f172a" strokeWidth={1.8} isAnimationActive={false} />
+                          <Line yAxisId="left" type="monotone" dataKey="vol_wave_10y" name="Vol wave (8–14y)" dot={false} stroke="#475569" strokeWidth={1.8} isAnimationActive={false} />
+                          <Line yAxisId="right" type="monotone" dataKey="risk_multiplier" name="Risk multiplier" dot={false} stroke="#1d4ed8" strokeWidth={1.6} isAnimationActive={false} />
+                        </>
+                      ) : (
+                        <>
+                          <Line yAxisId="left" type="monotone" dataKey="wave_7y_phase" name="Price phase" dot={false} stroke="#0f172a" strokeWidth={1.8} isAnimationActive={false} />
+                          <Line yAxisId="left" type="monotone" dataKey="vol_wave_10y_phase" name="Vol phase" dot={false} stroke="#475569" strokeWidth={1.8} isAnimationActive={false} />
+                        </>
+                      )}
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </section>
+
           </div>
 
           {/* Right Column: Stats + Portfolio */}

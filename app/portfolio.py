@@ -10,6 +10,8 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from app import db
+from app.cycles import load_cycle_snapshot
+from app.fear_euphoria import load_fear_euphoria_snapshot
 from app.settings import get_settings
 
 
@@ -274,6 +276,64 @@ def _compute_portfolio_from_px(
     }
     macro_mult = float(mult_map.get(str(macro_state or "").upper(), 1.0))
 
+    # Optional: cycle-based risk scaling (global risk appetite multiplier).
+    cycle_mult = 1.0
+    cycle_diag: Dict[str, Optional[float]] = {}
+    if bool(getattr(settings, "portfolio_use_cycles", False)):
+        snap = load_cycle_snapshot(
+            as_of,
+            csv_name=str(getattr(settings, "portfolio_cycles_csv_name", "cycles_daily.csv") or "cycles_daily.csv"),
+        )
+        if snap is not None:
+            cycle_mult = float(snap.risk_multiplier or 1.0)
+            cycle_diag = {
+                "risk_multiplier": cycle_mult,
+                "price_cycle_z": snap.price_cycle_z,
+                "vol_z": snap.vol_z,
+                "wave_7y": snap.wave_7y,
+                "wave_7y_phase": snap.wave_7y_phase,
+                "vol_wave_10y": snap.vol_wave_10y,
+                "vol_wave_10y_phase": snap.vol_wave_10y_phase,
+                "as_of_date": snap.as_of_date,
+            }
+
+    # Optional: Fear/Euphoria overlay (only FEAR reduces risk + cap).
+    fe_diag: Dict[str, Optional[float]] = {}
+    fear_risk_mult = 1.0
+    fear_cap = None
+    if bool(getattr(settings, "portfolio_use_fear_euphoria", True)):
+        try:
+            fe = load_fear_euphoria_snapshot(as_of)
+        except Exception:
+            fe = None
+        if fe is not None:
+            fe_diag = {
+                "months_until_fear": fe.months_until_fear,
+                "months_until_euphoria": fe.months_until_euphoria,
+                "confidence": fe.confidence,
+                "fear_window_36m": fe.fear_window_36m,
+                "euphoria_window_36m": fe.euphoria_window_36m,
+                "fear_trigger": fe.fear_trigger,
+                "euphoria_trigger": fe.euphoria_trigger,
+                "as_of_date": fe.as_of_date,
+            }
+            lvl = int(fe.fear_level or 0) if (fe.fear_level is not None) else (1 if int(fe.fear_trigger or 0) == 1 else 0)
+            if lvl > 0:
+                # Tiered defense levels (1-3). Default values are in app/settings.py.
+                if lvl == 1:
+                    fear_risk_mult = float(getattr(settings, "portfolio_fear_level1_risk_multiplier", 0.85))
+                    fear_cap = float(getattr(settings, "portfolio_fear_level1_leverage_cap", 1.2))
+                elif lvl == 2:
+                    fear_risk_mult = float(getattr(settings, "portfolio_fear_level2_risk_multiplier", 0.70))
+                    fear_cap = float(getattr(settings, "portfolio_fear_level2_leverage_cap", 1.0))
+                else:
+                    fear_risk_mult = float(getattr(settings, "portfolio_fear_level3_risk_multiplier", 0.50))
+                    fear_cap = float(getattr(settings, "portfolio_fear_level3_leverage_cap", 0.6))
+
+                fe_diag["fear_level"] = lvl
+                if fear_cap and fear_cap > 0:
+                    cap = min(cap, fear_cap)
+
     weights_raw: Dict[str, float] = {}
     diagnostics: Dict[str, Dict] = {}
     need = max(ma_win, vol_win + 1)
@@ -311,7 +371,7 @@ def _compute_portfolio_from_px(
             if w > cap:
                 w = cap
             if asset_id in risk_assets:
-                w *= macro_mult
+                w *= (macro_mult * float(cycle_mult) * float(fear_risk_mult))
 
         weights_raw[asset_id] = float(max(0.0, w))
         diagnostics[asset_id] = {
@@ -322,6 +382,12 @@ def _compute_portfolio_from_px(
             "vol_ann": vol_ann if math.isfinite(vol_ann) else None,
             "raw_weight": weights_raw[asset_id],
         }
+
+    if cycle_diag:
+        diagnostics["__cycles__"] = cycle_diag
+
+    if fe_diag:
+        diagnostics["__fear_euphoria__"] = fe_diag
 
     gross = float(sum(weights_raw.values()))
     scale = 1.0

@@ -89,6 +89,25 @@ class Settings(BaseSettings):
     portfolio_macro_multiplier_defcon2: float = Field(1.0, env="PORTFOLIO_MACRO_MULTIPLIER_DEFCON2")
     portfolio_macro_multiplier_defcon1: float = Field(1.0, env="PORTFOLIO_MACRO_MULTIPLIER_DEFCON1")
 
+    # Optional: cycle-based risk scaling (uses exported ./data/cycles_daily.csv)
+    portfolio_use_cycles: bool = Field(False, env="PORTFOLIO_USE_CYCLES")
+    portfolio_cycles_csv_name: str = Field("cycles_daily.csv", env="PORTFOLIO_CYCLES_CSV_NAME")
+
+    # Optional: Fear/Euphoria overlay (uses exported ./data/fear_euphoria_daily.csv)
+    # - Forecast window is cycle-based (months_until_fear/euphoria)
+    # - Confirm trigger flags are event-based (vol spike + trend break + DEFCON2/1 for fear)
+    portfolio_use_fear_euphoria: bool = Field(True, env="PORTFOLIO_USE_FEAR_EUPHORIA")
+    portfolio_fear_leverage_cap: float = Field(1.0, env="PORTFOLIO_FEAR_LEVERAGE_CAP")
+    portfolio_fear_risk_multiplier: float = Field(0.6, env="PORTFOLIO_FEAR_RISK_MULTIPLIER")
+
+    # Tiered FEAR defense parameters (used when fear_level=1/2/3)
+    portfolio_fear_level1_leverage_cap: float = Field(1.2, env="PORTFOLIO_FEAR_L1_LEVERAGE_CAP")
+    portfolio_fear_level2_leverage_cap: float = Field(1.0, env="PORTFOLIO_FEAR_L2_LEVERAGE_CAP")
+    portfolio_fear_level3_leverage_cap: float = Field(0.6, env="PORTFOLIO_FEAR_L3_LEVERAGE_CAP")
+    portfolio_fear_level1_risk_multiplier: float = Field(0.85, env="PORTFOLIO_FEAR_L1_RISK_MULTIPLIER")
+    portfolio_fear_level2_risk_multiplier: float = Field(0.70, env="PORTFOLIO_FEAR_L2_RISK_MULTIPLIER")
+    portfolio_fear_level3_risk_multiplier: float = Field(0.50, env="PORTFOLIO_FEAR_L3_RISK_MULTIPLIER")
+
     # Dynamic allocation defaults for fixed model (see app/engine.py).
     equity_weight_normal: float = Field(0.0, env="EQUITY_WEIGHT_NORMAL")
     equity_weight_defcon2_trend_up: float = Field(0.5, env="EQUITY_WEIGHT_DEFCON2_TREND_UP")
@@ -117,6 +136,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
 

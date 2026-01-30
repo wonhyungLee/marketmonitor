@@ -212,6 +212,43 @@ def build_embed(result: EngineResult) -> Dict:
         except Exception:
             pass
 
+    # Fear / Euphoria (cycle-forecast + trigger)
+    fe = (result.reasons or {}).get("fear_euphoria")
+    if isinstance(fe, dict) and fe:
+        try:
+            mu_f = fe.get("months_until_fear")
+            mu_e = fe.get("months_until_euphoria")
+            conf = fe.get("confidence")
+            f_tr = fe.get("fear_trigger")
+            f_lvl = fe.get("fear_level")
+            e_tr = fe.get("euphoria_trigger")
+            e_lvl = fe.get("euphoria_level")
+            f_w36 = fe.get("fear_window_36m")
+            e_w36 = fe.get("euphoria_window_36m")
+
+            def _fmt_months(v):
+                if v is None:
+                    return "N/A"
+                try:
+                    v = float(v)
+                except Exception:
+                    return "N/A"
+                if v <= 0.1:
+                    return "now"
+                return f"{v:.1f}m"
+
+            lines = []
+            lines.append(f"FEAR window(<=36m): {'YES' if int(f_w36 or 0) else 'no'} | ETA {_fmt_months(mu_f)} | level {int(f_lvl or 0)} | trigger {'ON' if int(f_tr or 0) else 'off'}")
+            lines.append(f"EUPH window(<=36m): {'YES' if int(e_w36 or 0) else 'no'} | ETA {_fmt_months(mu_e)} | level {int(e_lvl or 0)} | trigger {'ON' if int(e_tr or 0) else 'off'}")
+            if conf is not None:
+                try:
+                    lines.append(f"Confidence: {float(conf) * 100.0:.0f}%")
+                except Exception:
+                    pass
+            fields.append({"name": "Fear / Euphoria", "value": "\n".join(lines), "inline": False})
+        except Exception:
+            pass
+
     duration_sec = result.reasons.get("duration_sec")
     if duration_sec is not None:
         fields.append({"name": "Compute Time", "value": f"{duration_sec:.1f}s", "inline": True})

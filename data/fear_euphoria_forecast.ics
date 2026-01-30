@@ -1,0 +1,46 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//MarketMonitor//FearEuphoria//EN
+BEGIN:VEVENT
+UID:fear-window36-start@marketmonitor
+DTSTART;VALUE=DATE:20280201
+DTEND;VALUE=DATE:20280202
+SUMMARY:FEAR window start (36m)
+DESCRIPTION:Cycle-based forecast window begins
+END:VEVENT
+BEGIN:VEVENT
+UID:fear-window24-start@marketmonitor
+DTSTART;VALUE=DATE:20290201
+DTEND;VALUE=DATE:20290202
+SUMMARY:FEAR window start (24m)
+DESCRIPTION:Closer approach to FEAR peak
+END:VEVENT
+BEGIN:VEVENT
+UID:fear-peak@marketmonitor
+DTSTART;VALUE=DATE:20310201
+DTEND;VALUE=DATE:20310202
+SUMMARY:FEAR peak (cycle forecast)
+DESCRIPTION:Predicted volatility cycle peak
+END:VEVENT
+BEGIN:VEVENT
+UID:euph-window36-start@marketmonitor
+DTSTART;VALUE=DATE:20230101
+DTEND;VALUE=DATE:20230102
+SUMMARY:EUPH window start (36m)
+DESCRIPTION:Cycle-based forecast window begins
+END:VEVENT
+BEGIN:VEVENT
+UID:euph-window24-start@marketmonitor
+DTSTART;VALUE=DATE:20240101
+DTEND;VALUE=DATE:20240102
+SUMMARY:EUPH window start (24m)
+DESCRIPTION:Closer approach to EUPH trough
+END:VEVENT
+BEGIN:VEVENT
+UID:euph-trough@marketmonitor
+DTSTART;VALUE=DATE:20260101
+DTEND;VALUE=DATE:20260102
+SUMMARY:EUPH trough (cycle forecast)
+DESCRIPTION:Predicted volatility cycle trough
+END:VEVENT
+END:VCALENDAR
