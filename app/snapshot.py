@@ -62,10 +62,15 @@ def build_snapshot(conn, as_of_date: Optional[date] = None, data_frame: Optional
                 as_of_date=date.today(), score=None, reasons=["no data"], health={},
                 hard_defcon1=False, components={}, ready=False, trend={}
             )
-        df = pd.DataFrame(rows, columns=["series_id", "time_utc_ms", "interval", "value"])
+        df = pd.DataFrame(rows, columns=["series_id", "time_utc_ms", "interval", "value", "received_at"])
 
     if "timestamp" not in df.columns:
-        df["timestamp"] = pd.to_datetime(df["time_utc_ms"], unit="ms", utc=True)
+        if bool(getattr(settings, "use_received_at_for_latest", False)):
+            ts = pd.to_datetime(df["received_at"], utc=True, errors="coerce")
+            fallback = pd.to_datetime(df["time_utc_ms"], unit="ms", utc=True)
+            df["timestamp"] = ts.fillna(fallback)
+        else:
+            df["timestamp"] = pd.to_datetime(df["time_utc_ms"], unit="ms", utc=True)
     if "as_of_date" not in df.columns:
         df["as_of_date"] = df["timestamp"].dt.tz_convert(tz).dt.date
 

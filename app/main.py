@@ -1,11 +1,12 @@
 import logging
 import sqlite3
 import os
+import csv
 import threading
 import time
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Set, Optional
+from typing import Set, Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.exceptions import RequestValidationError
@@ -33,6 +34,8 @@ SITE_DIR = BASE_DIR / "site"
 DATA_DIR = BASE_DIR / "data"
 SITE2_DIR = BASE_DIR / "site-react" / "dist"
 INDICATOR_DIR = BASE_DIR / "지표데이터"
+WONGRAM_DIR = BASE_DIR.parent / "html2" / "public"
+WEBHOOK_CSV = DATA_DIR / "webhook_records.csv"
 
 if SITE_DIR.exists():
     app.mount("/site", StaticFiles(directory=SITE_DIR, html=True), name="site")
@@ -53,6 +56,33 @@ def _get_trigger_ids() -> Set[str]:
         # Empty or wildcard means: trigger on any webhook.
         return set()
     return {s.strip() for s in cfg.split(",") if s.strip()}
+
+
+def _get_allowed_webhook_series() -> Set[str]:
+    """웹훅 저장 허용 시리즈 ID 목록 (대소문자 무시). 빈 값이면 모두 허용."""
+    cfg = str(getattr(settings, "webhook_allowed_series", "") or "").strip().upper()
+    if not cfg:
+        return set()
+    return {s.strip() for s in cfg.split(",") if s.strip()}
+
+
+def _write_webhook_records_csv(conn) -> None:
+    try:
+        rows = conn.execute(
+            """
+            SELECT series_id, time_utc_ms, interval, value, received_at
+            FROM market_observations
+            ORDER BY received_at ASC
+            """
+        ).fetchall()
+
+        WEBHOOK_CSV.parent.mkdir(parents=True, exist_ok=True)
+        with WEBHOOK_CSV.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["series_id", "time_utc_ms", "interval", "value", "received_at"])
+            writer.writerows(rows)
+    except Exception:
+        logger.exception("Failed to write webhook_records.csv")
 
 
 @app.exception_handler(RequestValidationError)
@@ -117,27 +147,62 @@ def _start_periodic_daily_job() -> None:
     _scheduler_started = True
 
 
+@app.get("/order")
 @app.post("/order")
+@app.get("/webhook")
+@app.post("/webhook")
+@app.get("/webhook/{webhook_token}")
 @app.post("/webhook/{webhook_token}")
 async def ingest(request: Request, background_tasks: BackgroundTasks, webhook_token: str = None):
     """
     웹훅 통합 수신 엔드포인트.
     수신 -> 즉시 저장 -> 비동기 계산(BackgroundTasks) 순으로 안전하게 처리합니다.
     """
-    if webhook_token is not None and settings.webhook_token and webhook_token != settings.webhook_token:
-        raise HTTPException(status_code=401, detail="invalid webhook token")
-
     raw_body = await request.body()
-    text_body = raw_body.decode("utf-8", errors="ignore")
-    data = _load_json_loose(text_body)
-    
+    text_body = raw_body.decode("utf-8", errors="ignore") if raw_body else ""
+    data = _load_json_loose(text_body) if text_body.strip() else None
+
     if data is None:
+        qp = dict(request.query_params)
+        payload_raw = None
+        for key in ("payload", "json", "data", "body"):
+            if key in qp and qp.get(key):
+                payload_raw = qp.get(key)
+                break
+        if payload_raw:
+            data = _load_json_loose(payload_raw)
+        elif qp:
+            data = qp
+
+    if data is None:
+        logger.error(
+            "Invalid JSON payload. method=%s path=%s body=%s query=%s",
+            request.method,
+            request.url.path,
+            text_body,
+            dict(request.query_params),
+        )
         return JSONResponse({"detail": "invalid json"}, status_code=422)
         
     try:
         payload = TradingViewPayload(**data)
     except ValidationError as exc:
+        logger.error("Webhook payload validation failed: %s body=%s", exc, text_body)
         return JSONResponse({"detail": exc.errors()}, status_code=422)
+
+    allowed_series = _get_allowed_webhook_series()
+    input_id = payload.series_id.upper()
+    allow_match = bool(getattr(settings, "webhook_allow_payload_match", False))
+    payload_allowed = (not allowed_series) or (input_id in allowed_series)
+
+    if webhook_token is not None and settings.webhook_token and webhook_token != settings.webhook_token:
+        if not (allow_match and payload_allowed):
+            raise HTTPException(status_code=401, detail="invalid webhook token")
+        logger.warning("Token mismatch but payload allowed; accepting. series_id=%s", input_id)
+
+    if allow_match and not payload_allowed:
+        logger.warning("Webhook payload series not allowed; skipping. series_id=%s", input_id)
+        return {"status": "ignored", "ingested": input_id, "reason": "series_id_not_allowed"}
 
     # 1. 원본 데이터 DB 저장 (WAL 모드로 락 걱정 없음)
     with db.db_session(settings.db_path) as conn:
@@ -150,9 +215,9 @@ async def ingest(request: Request, background_tasks: BackgroundTasks, webhook_to
             received_at=payload.received_at_iso,
             payload=payload.dict(),
         )
+        _write_webhook_records_csv(conn)
 
     # 2. 트리거 판정 (유연한 매칭 로직)
-    input_id = payload.series_id.upper()
     trigger_set = _get_trigger_ids()
 
     # 키워드 매칭 및 명시적 리스트 매칭 결합
@@ -180,9 +245,6 @@ async def ingest(request: Request, background_tasks: BackgroundTasks, webhook_to
     return {"status": "ok", "ingested": input_id, "background_job": is_trigger}
 
 
-@app.get("/")
-def root() -> dict:
-    return {
-        "message": "WarRoom v2.1 Institutional Ingest Server",
-        "uptime": datetime.now(tz=timezone.utc).isoformat(),
-    }
+if WONGRAM_DIR.exists():
+    # Register last so API routes win on exact matches like /health, /order.
+    app.mount("/", StaticFiles(directory=WONGRAM_DIR, html=True), name="wongram-root")

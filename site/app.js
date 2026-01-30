@@ -482,6 +482,7 @@ function renderTable(state, filteredRows) {
 
 function buildFilteredRows(state, startDate, endDate, enabledStates) {
   const q = (state.ui.search.value || "").trim().toLowerCase();
+  const qPortfolio = (state.ui.searchPortfolio?.value || "").trim().toLowerCase();
   const onlyTradingDays = state.ui.onlyTradingDays.checked;
 
   const out = [];
@@ -496,6 +497,20 @@ function buildFilteredRows(state, startDate, endDate, enabledStates) {
     if (q && !triggers.toLowerCase().includes(q)) continue;
 
     const port = state.portfolioByDate ? state.portfolioByDate.get(r.date) : null;
+    if (qPortfolio) {
+      const portSearch = getPortfolioForDate(state, r.date);
+      const searchParts = [];
+      if (portSearch && portSearch.fullText) searchParts.push(portSearch.fullText);
+      else if (portSearch && portSearch.topText) searchParts.push(portSearch.topText);
+      if (portSearch && portSearch.cash !== null && portSearch.cash !== undefined) {
+        searchParts.push(`CASH ${fmtNum(portSearch.cash * 100.0, 1)}%`);
+      }
+      if (portSearch && portSearch.gross !== null && portSearch.gross !== undefined) {
+        searchParts.push(`GROSS ${fmtNum(portSearch.gross, 2)}x`);
+      }
+      const portText = searchParts.join(" | ").toLowerCase();
+      if (!portText || !portText.includes(qPortfolio)) continue;
+    }
 
     out.push({
       date: r.date,
@@ -544,8 +559,10 @@ function jumpToDate(state, dateStr) {
 
   // Relax filters just enough to make the selected date visible.
   const origSearch = state.ui.search.value;
-  if (origSearch && origSearch.trim() !== "") {
+  const origPortfolioSearch = state.ui.searchPortfolio?.value || "";
+  if ((origSearch && origSearch.trim() !== "") || (origPortfolioSearch && origPortfolioSearch.trim() !== "")) {
     state.ui.search.value = "";
+    if (state.ui.searchPortfolio) state.ui.searchPortfolio.value = "";
     renderAll(state);
     if (tryJump()) return;
   }
@@ -659,6 +676,12 @@ function wireUi(state) {
     state.page = 0;
     renderAll(state);
   });
+  if (state.ui.searchPortfolio) {
+    state.ui.searchPortfolio.addEventListener("input", () => {
+      state.page = 0;
+      renderAll(state);
+    });
+  }
 
   state.ui.btnPrev.addEventListener("click", () => {
     state.page -= 1;
@@ -1022,6 +1045,7 @@ function boot() {
       start: document.getElementById("startDate"),
       end: document.getElementById("endDate"),
       search: document.getElementById("search"),
+      searchPortfolio: document.getElementById("searchPortfolio"),
       tableBody: document.getElementById("tableBody"),
       pageInfo: document.getElementById("pageInfo"),
       btnPrev: document.getElementById("btnPrev"),

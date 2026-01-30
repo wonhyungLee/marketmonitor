@@ -28,8 +28,15 @@ def _load_observations_frame(conn, tz: ZoneInfo) -> Optional[pd.DataFrame]:
     rows = db.fetch_observations(conn)
     if not rows:
         return None
-    df = pd.DataFrame(rows, columns=["series_id", "time_utc_ms", "interval", "value"])
-    df["timestamp"] = pd.to_datetime(df["time_utc_ms"], unit="ms", utc=True)
+    df = pd.DataFrame(rows, columns=["series_id", "time_utc_ms", "interval", "value", "received_at"])
+    settings = get_settings()
+    if bool(getattr(settings, "use_received_at_for_latest", False)):
+        ts = pd.to_datetime(df["received_at"], utc=True, errors="coerce")
+        # Fallback to time_utc_ms when received_at is missing/invalid.
+        fallback = pd.to_datetime(df["time_utc_ms"], unit="ms", utc=True)
+        df["timestamp"] = ts.fillna(fallback)
+    else:
+        df["timestamp"] = pd.to_datetime(df["time_utc_ms"], unit="ms", utc=True)
     df["as_of_date"] = df["timestamp"].dt.tz_convert(tz).dt.date
     return df
 
@@ -79,7 +86,6 @@ def run_daily_job(
                 if obs_df is None or obs_df.empty:
                     logger.warning("No observations found; skipping daily job.")
                     return None
-
                 end_date = obs_df["as_of_date"].max()
                 start_date = end_date - timedelta(days=max(1, int(window_days)) - 1)
 

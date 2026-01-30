@@ -7,6 +7,12 @@ class Settings(BaseSettings):
     host: str = Field("0.0.0.0", env="HOST")
     port: int = Field(8000, env="PORT")
     webhook_token: str = Field("", env="WEBHOOK_TOKEN")
+    webhook_allow_payload_match: bool = Field(True, env="WEBHOOK_ALLOW_PAYLOAD_MATCH")
+    webhook_allowed_series: str = Field(
+        "T10Y2Y,BAMLH0A0HYM2,COPPER_GOLD_RATIO,WEI,SAHMREALTIME,UMCSENT,"
+        "NASDAQ_DLY_IXIC,US100,BTCUSD,COPPER,REMX,ALUMINUM,URANIUM,XAUUSD,USDKRW,US10Y,US02Y",
+        env="WEBHOOK_ALLOWED_SERIES",
+    )
     db_path: str = Field("./warroom.db", env="DB_PATH")
     discord_webhook_url: str = Field("", env="DISCORD_WEBHOOK_URL")
     discord_site_url: str = Field("https://wongram.shop/site2", env="DISCORD_SITE_URL")
@@ -17,6 +23,8 @@ class Settings(BaseSettings):
     timezone: str = Field("Asia/Seoul", env="TIMEZONE")
     as_of_tz: str = Field("Asia/Seoul", env="AS_OF_TZ")
     log_level: str = Field("INFO", env="LOG_LEVEL")
+    # Use webhook received_at timestamp for "latest" ordering
+    use_received_at_for_latest: bool = Field(False, env="USE_RECEIVED_AT_FOR_LATEST")
 
     # Engine tuning (WarRoom v2.0 "Hybrid Model")
     defcon2_score_threshold: float = Field(2.0, env="DEFCON2_SCORE_THRESHOLD")

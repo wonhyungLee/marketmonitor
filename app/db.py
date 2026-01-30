@@ -231,7 +231,7 @@ def fetch_observations(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT series_id, time_utc_ms, interval, value
+        SELECT series_id, time_utc_ms, interval, value, received_at
         FROM market_observations;
         """
     )

@@ -1,0 +1,36 @@
+--- etc/apache2/sites-available/wongram.shop.conf
++++ etc/apache2/sites-available/wongram.shop.conf
+@@
+-    RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
+-    RewriteRule ^/?(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
++    RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
++    RewriteCond %{REQUEST_URI} !^/(order|webhook)(/|$)
++    RewriteRule ^/?(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+@@
+-    # TradingView webhook -> WarRoom
+-    ProxyPass /order http://127.0.0.1:8000/webhook/warroom-secret-token
+-    ProxyPassReverse /order http://127.0.0.1:8000/webhook/warroom-secret-token
++    # WarRoom webhook/order (no token)
++    ProxyPass /order http://127.0.0.1:8000/order
++    ProxyPassReverse /order http://127.0.0.1:8000/order
++    ProxyPass /webhook http://127.0.0.1:8000/webhook
++    ProxyPassReverse /webhook http://127.0.0.1:8000/webhook
+@@
+-    ErrorLog /wongram.shop_error.log
+-    CustomLog /wongram.shop_access.log combined
+-    ProxyPreserveHost On
+-    ProxyPass /order http://127.0.0.1:8000/order
+-    ProxyPassReverse /order http://127.0.0.1:8000/order
+-    ProxyPass /webhook http://127.0.0.1:8000/webhook
+-    ProxyPassReverse /webhook http://127.0.0.1:8000/webhook
++    ErrorLog /wongram.shop_error.log
++    CustomLog /wongram.shop_access.log combined
+@@
+-    # TradingView webhook -> WarRoom
+-    ProxyPass /order http://127.0.0.1:8000/webhook/warroom-secret-token
+-    ProxyPassReverse /order http://127.0.0.1:8000/webhook/warroom-secret-token
++    # WarRoom webhook/order (no token)
++    ProxyPass /order http://127.0.0.1:8000/order
++    ProxyPassReverse /order http://127.0.0.1:8000/order
++    ProxyPass /webhook http://127.0.0.1:8000/webhook
++    ProxyPassReverse /webhook http://127.0.0.1:8000/webhook

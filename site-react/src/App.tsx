@@ -16,7 +16,13 @@ import {
 import { format, parseISO, subYears, endOfWeek, endOfMonth } from "date-fns";
 import { useWarRoomData } from "@/hooks/useWarRoomData";
 import { cn } from "@/lib/utils";
-import { RefreshCw, Search, Filter, Maximize2, X, RotateCcw, Languages } from "lucide-react";
+import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
+import Search from "lucide-react/dist/esm/icons/search.js";
+import Filter from "lucide-react/dist/esm/icons/filter.js";
+import Maximize2 from "lucide-react/dist/esm/icons/maximize-2.js";
+import X from "lucide-react/dist/esm/icons/x.js";
+import RotateCcw from "lucide-react/dist/esm/icons/rotate-ccw.js";
+import Languages from "lucide-react/dist/esm/icons/languages.js";
 import type { MarketStateRow } from "@/types";
 
 const STATE_COLORS = {
@@ -44,13 +50,17 @@ const TRANSLATIONS = {
     onlyTradingDays: "Only trading days",
     dailyRecords: "Daily Records",
     searchPlaceholder: "Filter triggers...",
+    searchPortfolioPlaceholder: "Filter portfolio...",
     stateMix: "State Mix",
     portfolioDetail: "Portfolio Detail",
+    portfolioText: "Portfolio Text",
     grossExposure: "Gross",
     cash: "Cash",
     allocations: "ALLOCATIONS",
     noAssets: "Cash 100% (No Assets)",
     noPortfolioData: "No portfolio data available for this date.",
+    copy: "Copy",
+    copied: "Copied",
     clickHint: "Click a row in the table or a point on the chart to view details.",
     noRecords: "No records found matching your filters.",
     colDate: "Date",
@@ -78,13 +88,17 @@ const TRANSLATIONS = {
     onlyTradingDays: "영업일만 보기",
     dailyRecords: "일별 기록",
     searchPlaceholder: "트리거 검색...",
+    searchPortfolioPlaceholder: "포트폴리오 검색...",
     stateMix: "상태 분포",
     portfolioDetail: "포트폴리오 상세",
+    portfolioText: "포트폴리오 텍스트",
     grossExposure: "총 노출",
     cash: "현금",
     allocations: "자산 배분",
     noAssets: "현금 100% (자산 없음)",
     noPortfolioData: "이 날짜의 포트폴리오 데이터가 없습니다.",
+    copy: "복사",
+    copied: "복사됨",
     clickHint: "테이블 행이나 차트를 클릭하여 상세 정보를 확인하세요.",
     noRecords: "조건에 맞는 데이터가 없습니다.",
     colDate: "날짜",
@@ -117,6 +131,8 @@ export default function App() {
   const { data, loading, error, reload } = useWarRoomData();
   const [dateRange, setDateRange] = useState({ start: "", end: "" });
   const [searchTerm, setSearchTerm] = useState("");
+  const [portfolioSearchTerm, setPortfolioSearchTerm] = useState("");
+  const [portfolioCopied, setPortfolioCopied] = useState(false);
   
   // Multi-select State
   const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set());
@@ -144,6 +160,70 @@ export default function App() {
       cash: 1 - ((p.gross || 0) / 2),
       weights: p.weights.map((w: any) => ({ ...w, w: w.w / 2 })),
     };
+  };
+
+  const portfolioDates = useMemo(() => {
+    if (!data) return [] as string[];
+    return Array.from(data.portfolio.keys()).sort();
+  }, [data]);
+
+  const findPortfolioDate = (date: string) => {
+    if (!portfolioDates.length) return null;
+    if (date < portfolioDates[0]) return null;
+    const lastIdx = portfolioDates.length - 1;
+    if (date >= portfolioDates[lastIdx]) return portfolioDates[lastIdx];
+    let lo = 0;
+    let hi = lastIdx;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const v = portfolioDates[mid];
+      if (v <= date) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    return hi >= 0 ? portfolioDates[hi] : null;
+  };
+
+  const resolvePortfolio = (date: string) => {
+    if (!data) return { portfolio: null as any, displayDate: date };
+    let port = data.portfolio.get(date);
+    let displayDate = date;
+    if (!port) {
+      const fallbackDate = findPortfolioDate(date);
+      if (fallbackDate) {
+        port = data.portfolio.get(fallbackDate);
+        displayDate = fallbackDate;
+      }
+    }
+    return { portfolio: port || null, displayDate };
+  };
+
+  const portfolioSearchText = (p: any) => {
+    const port = transformPortfolio(p);
+    if (!port) return "";
+    const parts = port.weights.map((w: any) => `${w.asset} ${(w.w * 100).toFixed(1)}%`);
+    if (typeof port.cash === "number") parts.push(`CASH ${(port.cash * 100).toFixed(1)}%`);
+    if (typeof port.gross === "number") parts.push(`GROSS ${port.gross.toFixed(2)}x`);
+    return parts.join(" | ").toLowerCase();
+  };
+
+  const portfolioDisplayText = (p: any) => {
+    const port = transformPortfolio(p);
+    if (!port) return "";
+    const parts = port.weights.map((w: any) => `${w.asset} ${(w.w * 100).toFixed(1)}%`);
+    if (typeof port.cash === "number") parts.push(`CASH ${(port.cash * 100).toFixed(1)}%`);
+    if (typeof port.gross === "number") parts.push(`GROSS ${port.gross.toFixed(2)}x`);
+    return parts.join(" | ");
+  };
+
+  const copyPortfolioText = async (text: string) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setPortfolioCopied(true);
+      window.setTimeout(() => setPortfolioCopied(false), 1500);
+    } catch {
+      // noop
+    }
   };
   
   // Language State
@@ -303,8 +383,27 @@ export default function App() {
           r.state.toLowerCase().includes(lower)
       );
     }
+    if (portfolioSearchTerm) {
+      const lower = portfolioSearchTerm.toLowerCase();
+      rows = rows.filter((r) => {
+        const { portfolio } = resolvePortfolio(r.date);
+        const text = portfolioSearchText(portfolio);
+        return text.includes(lower);
+      });
+    }
     return rows;
-  }, [aggregatedData, data, dateRange, enabledStates, onlyTradingDays, searchTerm, period]);
+  }, [
+    aggregatedData,
+    data,
+    dateRange,
+    enabledStates,
+    onlyTradingDays,
+    searchTerm,
+    portfolioSearchTerm,
+    period,
+    viewBasis,
+    portfolioDates,
+  ]);
 
   // Chart Data
   const chartData = useMemo(() => {
@@ -686,23 +785,13 @@ export default function App() {
 
                 {/* Portfolio Section in Popup */}
                 {(() => {
-                    let p = data?.portfolio.get(lastSelectedDate);
-                    let displayDate = lastSelectedDate;
-                    if (!p && data) {
-                      const dates = Array.from(data.portfolio.keys()).sort();
-                      const idx = dates.findIndex(d => d > lastSelectedDate);
-                      let fallbackDate = null;
-                      if (idx === -1 && dates.length > 0) fallbackDate = dates[dates.length - 1];
-                      else if (idx > 0) fallbackDate = dates[idx - 1];
-                      if (fallbackDate) {
-                        p = data.portfolio.get(fallbackDate);
-                        displayDate = fallbackDate;
-                      }
-                    }
-
-                    p = transformPortfolio(p);
+                    const resolved = resolvePortfolio(lastSelectedDate);
+                    const p = transformPortfolio(resolved.portfolio);
+                    const displayDate = resolved.displayDate;
 
                     if (!p) return null;
+
+                    const portText = portfolioDisplayText(p);
 
                     return (
                       <div className="pt-6 border-t border-slate-100">
@@ -724,6 +813,21 @@ export default function App() {
                              <div className="text-[10px] text-slate-400 font-semibold uppercase">Cash</div>
                              <div className="font-bold text-slate-700 text-lg">{((p.cash||0)*100).toFixed(0)}%</div>
                            </div>
+                        </div>
+
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 mb-4">
+                          <div className="flex items-center justify-between gap-2 mb-1">
+                            <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">{t.portfolioText}</span>
+                            <button
+                              type="button"
+                              onClick={() => copyPortfolioText(portText)}
+                              disabled={!portText}
+                              className="text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded border border-slate-200 bg-white text-slate-500 hover:text-slate-700 disabled:opacity-50"
+                            >
+                              {portfolioCopied ? t.copied : t.copy}
+                            </button>
+                          </div>
+                          <p className="text-sm text-slate-700 leading-relaxed">{portText || t.noPortfolioData}</p>
                         </div>
 
                         <div className="space-y-2">
@@ -1025,15 +1129,27 @@ export default function App() {
               <div className="mt-8 pt-6 border-t border-slate-100">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider">{t.dailyRecords}</h3>
-                  <div className="relative w-64">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 h-3.5 w-3.5" />
-                    <input
-                      type="text"
-                      placeholder={t.searchPlaceholder}
-                      className="w-full rounded-md border border-slate-200 bg-slate-50 py-1.5 pl-9 pr-3 text-xs focus:border-indigo-500 focus:outline-none"
-                      value={searchTerm}
-                      onChange={(e) => setSearchTerm(e.target.value)}
-                    />
+                  <div className="flex items-center gap-2 flex-wrap justify-end">
+                    <div className="relative w-56">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 h-3.5 w-3.5" />
+                      <input
+                        type="text"
+                        placeholder={t.searchPlaceholder}
+                        className="w-full rounded-md border border-slate-200 bg-slate-50 py-1.5 pl-9 pr-3 text-xs focus:border-indigo-500 focus:outline-none"
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                      />
+                    </div>
+                    <div className="relative w-56">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 h-3.5 w-3.5" />
+                      <input
+                        type="text"
+                        placeholder={t.searchPortfolioPlaceholder}
+                        className="w-full rounded-md border border-slate-200 bg-slate-50 py-1.5 pl-9 pr-3 text-xs focus:border-indigo-500 focus:outline-none"
+                        value={portfolioSearchTerm}
+                        onChange={(e) => setPortfolioSearchTerm(e.target.value)}
+                      />
+                    </div>
                   </div>
                 </div>
                 <div className="overflow-x-auto max-h-[350px]">
