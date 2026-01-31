@@ -20,51 +20,37 @@ export interface NasdaqRow {
   close: number | null;
 }
 
-
-export interface CyclesRow {
+export interface ForecastV1Row {
   date: string; // YYYY-MM-DD
-  risk_multiplier: number | null;
-  price_cycle_z: number | null;
-  vol_z: number | null;
-  wave_7y: number | null;
-  wave_7y_phase: number | null;
-  vol_wave_10y: number | null;
-  vol_wave_10y_phase: number | null;
-}
+  model: string;
+  status?: string;
 
-export interface FearEuphoriaRow {
-  date: string; // YYYY-MM-DD
-  months_until_fear: number | null;
-  months_until_euphoria: number | null;
-  confidence: number | null;
-  fear_window_24m?: boolean;
-  fear_window_36m?: boolean;
-  euphoria_window_24m?: boolean;
-  euphoria_window_36m?: boolean;
-  fear_trigger: boolean;
-  euphoria_trigger: boolean;
-  fear_level: number | null;
-  euphoria_level: number | null;
-}
+  p_crisis_1y: number | null;
+  p_crisis_2y: number | null;
+  p_crisis_3y: number | null;
 
-export interface FearCalendarRow {
-  month: string; // YYYY-MM (or month-end date)
-  f24?: number | null;
-  f36?: number | null;
-  e24?: number | null;
-  e36?: number | null;
-  as_of?: string;
-  fear_peak?: string;
-  euph_trough?: string;
+  p_euphoria_1y: number | null;
+  p_euphoria_2y: number | null;
+  p_euphoria_3y: number | null;
+
+  net_1y: number | null;
+  net_2y: number | null;
+  net_3y: number | null;
+
+  conf_crisis_1y: number | null;
+  conf_crisis_2y: number | null;
+  conf_crisis_3y: number | null;
+
+  conf_euphoria_1y: number | null;
+  conf_euphoria_2y: number | null;
+  conf_euphoria_3y: number | null;
 }
 
 export interface DashboardData {
   states: MarketStateRow[];
   portfolio: Map<string, PortfolioRow>;
   nasdaq: NasdaqRow[];
-  cycles?: CyclesRow[];
-  fearEuphoria?: FearEuphoriaRow[];
-  fearCalendar?: FearCalendarRow[];
+  forecastV1?: ForecastV1Row[];
   minDate: string;
   maxDate: string;
 }

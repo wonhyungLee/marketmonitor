@@ -69,10 +69,12 @@ const TRANSLATIONS = {
     nasdaqClose: "NASDAQ Close",
     portfolio: "Portfolio",
     from: "from",
-    cyclesTitle: "Cycles",
-    cyclesSub: "Vol/price long-run cycles, with Fear/Euphoria zones",
-    signals: "Signals",
-    phases: "Phases",
+    forecastTitle: "Forecast (Crisis & Euphoria)",
+    forecastSub: "Probabilities that the market will be in crisis (risk-off) or euphoria (overheat) in H years",
+    horizon: "Horizon",
+    crisis: "Crisis",
+    euphoria: "Euphoria",
+    net: "Net (Euphoria - Crisis)",
   },
   ko: {
     headerTitle: "나스닥 + 시장 상태 감지",
@@ -111,10 +113,12 @@ const TRANSLATIONS = {
     nasdaqClose: "나스닥 종가",
     portfolio: "포트폴리오",
     from: "데이터 기준:",
-    cyclesTitle: "사이클",
-    cyclesSub: "가격/변동성 장기 사이클과 공포·환희 구간",
-    signals: "신호",
-    phases: "위상",
+    forecastTitle: "전망 (위기 & 환희)",
+    forecastSub: "H년 뒤 시장이 위기(리스크오프) 또는 환희(과열) 상태일 확률",
+    horizon: "기간",
+    crisis: "위기",
+    euphoria: "환희",
+    net: "순확률(환희-위기)",
   },
 };
 
@@ -249,7 +253,7 @@ export default function App() {
   
   // Popup State
   const [showPopup, setShowPopup] = useState(false);
-  const [cyclesView, setCyclesView] = useState<"signals" | "phases">("signals");
+  const [forecastHorizon, setForecastHorizon] = useState<"1y" | "2y" | "3y">("2y");
   const [showDetailPopup, setShowDetailPopup] = useState(false);
   const [dontShowToday, setDontShowToday] = useState(false);
 
@@ -364,47 +368,32 @@ export default function App() {
   }, [data, period]);
 
 
-  const fearMap = useMemo(() => {
+  const forecastMap = useMemo(() => {
     const m = new Map<string, any>();
-    (data?.fearEuphoria || []).forEach((r) => {
+    (data?.forecastV1 || []).forEach((r) => {
       if (r.date) m.set(r.date, r);
     });
     return m;
-  }, [data?.fearEuphoria]);
+  }, [data?.forecastV1]);
 
-  const cyclesChart = useMemo(() => {
-    const cycles = data?.cycles || [];
-    if (!cycles || cycles.length === 0) return { data: [], fearSpans: [], euphSpans: [] };
-    const within = cycles.filter((r) => r.date >= dateRange.start && r.date <= dateRange.end);
-    const step = Math.max(1, Math.ceil(within.length / 1500));
+  const forecastChart = useMemo(() => {
+    const rows = data?.forecastV1 || [];
+    if (!rows || rows.length === 0) return { data: [] as any[] };
+    const within = rows.filter((r) => r.date >= dateRange.start && r.date <= dateRange.end);
+    const step = Math.max(1, Math.ceil(within.length / 1200));
     const sampled = within.filter((_, i) => i % step === 0).map((r) => {
-      const fe = fearMap.get(r.date);
+      const c = (r as any)[`p_crisis_${forecastHorizon}`] ?? null;
+      const e = (r as any)[`p_euphoria_${forecastHorizon}`] ?? null;
+      const net = (r as any)[`net_${forecastHorizon}`] ?? (e !== null && c !== null ? e - c : null);
       return {
-        ...r,
-        fear_level: fe?.fear_level ?? null,
-        euphoria_level: fe?.euphoria_level ?? null,
+        date: r.date,
+        p_crisis: c,
+        p_euphoria: e,
+        net,
       };
     });
-
-    const spans = (key: "fear_level" | "euphoria_level") => {
-      const out: { x1: string; x2: string }[] = [];
-      let start: string | null = null;
-      let prev: string | null = null;
-      for (const pt of sampled as any[]) {
-        const on = (pt[key] ?? 0) > 0;
-        if (on && start === null) start = pt.date;
-        if (!on && start !== null) {
-          out.push({ x1: start, x2: prev ?? start });
-          start = null;
-        }
-        prev = pt.date;
-      }
-      if (start !== null) out.push({ x1: start, x2: prev ?? start });
-      return out;
-    };
-
-    return { data: sampled, fearSpans: spans("fear_level"), euphSpans: spans("euphoria_level") };
-  }, [data?.cycles, dateRange.start, dateRange.end, fearMap]);
+    return { data: sampled };
+  }, [data?.forecastV1, dateRange.start, dateRange.end, forecastHorizon]);
 
 
   // Filter Data
@@ -440,25 +429,26 @@ export default function App() {
     }
     
 
-    // Append Fear/Euphoria forecast snapshot into triggers (if available)
+    // Append Forecast v1 snapshot into triggers (if available)
     rows = rows.map((r) => {
-      const fe = fearMap.get(r.date);
-      if (!fe) return r;
-      const fearEta = fe.months_until_fear ?? null;
-      const euphEta = fe.months_until_euphoria ?? null;
-      const conf = fe.confidence ?? null;
-      const fearLv = fe.fear_level ?? 0;
-      const euphLv = fe.euphoria_level ?? 0;
-      const fearOn = fe.fear_trigger ? "ON" : "off";
-      const euphOn = fe.euphoria_trigger ? "ON" : "off";
+      const fo: any = forecastMap.get(r.date);
+      if (!fo) return r;
+      const c = fo[`p_crisis_${forecastHorizon}`] ?? null;
+      const e = fo[`p_euphoria_${forecastHorizon}`] ?? null;
+      const cc = fo[`conf_crisis_${forecastHorizon}`] ?? null;
+      const ec = fo[`conf_euphoria_${forecastHorizon}`] ?? null;
       const parts: string[] = [];
-      if (fearEta !== null) parts.push(`FEAR ETA: ${Math.round(fearEta)}m (L${fearLv}, trigger ${fearOn})`);
-      if (euphEta !== null) parts.push(`EUPH ETA: ${Math.round(euphEta)}m (L${euphLv}, trigger ${euphOn})`);
-      if (conf !== null) parts.push(`Confidence: ${Math.round(conf * 100)}%`);
-      const extra = parts.length ? " | " + parts.join(" · ") : "";
+      if (c !== null) parts.push(`Crisis ${Math.round(c * 100)}%`);
+      if (e !== null) parts.push(`Euphoria ${Math.round(e * 100)}%`);
+      if (cc !== null || ec !== null) {
+        const ccs = cc !== null ? `${Math.round(cc * 100)}%` : "-";
+        const ecs = ec !== null ? `${Math.round(ec * 100)}%` : "-";
+        parts.push(`Conf ${ccs}/${ecs}`);
+      }
+      const extra = parts.length ? ` | Forecast(${forecastHorizon}): ` + parts.join(" · ") : "";
       return { ...r, triggers: (r.triggers || "") + extra };
     });
-return rows;
+    return rows;
   }, [
     aggregatedData,
     data,
@@ -470,6 +460,8 @@ return rows;
     period,
     viewBasis,
     portfolioDates,
+    forecastMap,
+    forecastHorizon,
   ]);
 
   // Chart Data
@@ -1297,77 +1289,57 @@ return rows;
 
 
 
-            {/* Cycles (Fear/Euphoria + long-run cycle) */}
+            {/* Forecast v1 (Crisis + Euphoria) */}
             <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 relative group transition-all hover:shadow-md">
-              <div className="flex flex-wrap items-center justify-between mb-4 gap-3">
-                <div>
-                  <h2 className="text-lg font-bold text-slate-900">{t.cyclesTitle}</h2>
-                  <p className="text-slate-400 text-xs">{t.cyclesSub}</p>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-lg font-bold text-slate-900">{t.forecastTitle}</h2>
+                   {(() => {
+                      const last = data?.forecastV1?.[data.forecastV1.length - 1];
+                      if (last?.status && last.status !== "OK") {
+                        return (
+                          <span className="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700 border border-amber-200">
+                            {last.status}
+                          </span>
+                        );
+                      }
+                      return null;
+                    })()}
                 </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <span className={cn("font-semibold", cyclesView === "signals" ? "text-slate-900" : "text-slate-400")}>
-                    {t.signals}
-                  </span>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      className="sr-only"
-                      checked={cyclesView === "phases"}
-                      onChange={(e) => setCyclesView(e.target.checked ? "phases" : "signals")}
-                      aria-label="Toggle cycles view"
-                    />
-                    <span
-                      className={cn(
-                        "inline-flex h-5 w-10 items-center rounded-full transition-colors",
-                        cyclesView === "phases" ? "bg-slate-900" : "bg-slate-200"
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          "h-4 w-4 rounded-full bg-white shadow transition-transform",
-                          cyclesView === "phases" ? "translate-x-5" : "translate-x-1"
-                        )}
-                      />
-                    </span>
-                  </label>
-                  <span className={cn("font-semibold", cyclesView === "phases" ? "text-slate-900" : "text-slate-400")}>
-                    {t.phases}
-                  </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-500 font-medium">{t.horizon}</span>
+                  <select
+                    className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-700"
+                    value={forecastHorizon}
+                    onChange={(e) => setForecastHorizon(e.target.value as any)}
+                    aria-label="Forecast horizon"
+                  >
+                    <option value="1y">1y</option>
+                    <option value="2y">2y</option>
+                    <option value="3y">3y</option>
+                  </select>
                 </div>
               </div>
 
-              {(!data?.cycles || data.cycles.length === 0) ? (
+              {(!data?.forecastV1 || data.forecastV1.length === 0) ? (
                 <div className="text-sm text-slate-500">
-                  No cycles data loaded (expected: <span className="font-mono">data/cycles_daily.csv</span>)
+                  No forecast data loaded (expected: <span className="font-mono">data/forecast_v1_daily.csv</span>)
                 </div>
               ) : (
                 <div className="h-[320px]">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={cyclesChart.data}>
+                    <LineChart data={forecastChart.data}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                       <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={30} />
-                      <YAxis yAxisId="left" tick={{ fontSize: 11 }} />
-                      <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-                      <Tooltip />
-                      {cyclesChart.fearSpans.map((s, i) => (
-                        <ReferenceArea key={"f"+i} x1={s.x1} x2={s.x2} yAxisId="left" fill="rgba(239,68,68,0.10)" strokeOpacity={0} />
-                      ))}
-                      {cyclesChart.euphSpans.map((s, i) => (
-                        <ReferenceArea key={"e"+i} x1={s.x1} x2={s.x2} yAxisId="left" fill="rgba(34,197,94,0.10)" strokeOpacity={0} />
-                      ))}
-
-                      {cyclesView === "signals" ? (
-                        <>
-                          <Line yAxisId="left" type="monotone" dataKey="wave_7y" name="Price wave (5–9y)" dot={false} stroke="#0f172a" strokeWidth={1.8} isAnimationActive={false} />
-                          <Line yAxisId="left" type="monotone" dataKey="vol_wave_10y" name="Vol wave (8–14y)" dot={false} stroke="#475569" strokeWidth={1.8} isAnimationActive={false} />
-                          <Line yAxisId="right" type="monotone" dataKey="risk_multiplier" name="Risk multiplier" dot={false} stroke="#1d4ed8" strokeWidth={1.6} isAnimationActive={false} />
-                        </>
-                      ) : (
-                        <>
-                          <Line yAxisId="left" type="monotone" dataKey="wave_7y_phase" name="Price phase" dot={false} stroke="#0f172a" strokeWidth={1.8} isAnimationActive={false} />
-                          <Line yAxisId="left" type="monotone" dataKey="vol_wave_10y_phase" name="Vol phase" dot={false} stroke="#475569" strokeWidth={1.8} isAnimationActive={false} />
-                        </>
-                      )}
+                      <YAxis domain={[0, 1]} tick={{ fontSize: 11 }} />
+                      <Tooltip
+                        formatter={(v: any) => (typeof v === "number" ? `${Math.round(v * 100)}%` : v)}
+                        labelFormatter={(l: any) => `${l}`}
+                        contentStyle={{ borderRadius: "10px" }}
+                      />
+                      <Line type="monotone" dataKey="p_crisis" name={t.crisis} dot={false} stroke="#ef4444" strokeWidth={1.8} isAnimationActive={false} />
+                      <Line type="monotone" dataKey="p_euphoria" name={t.euphoria} dot={false} stroke="#22c55e" strokeWidth={1.8} isAnimationActive={false} />
+                      <Line type="monotone" dataKey="net" name={t.net} dot={false} stroke="#1d4ed8" strokeWidth={1.4} isAnimationActive={false} />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>

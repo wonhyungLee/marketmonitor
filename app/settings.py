@@ -96,7 +96,9 @@ class Settings(BaseSettings):
     # Optional: Fear/Euphoria overlay (uses exported ./data/fear_euphoria_daily.csv)
     # - Forecast window is cycle-based (months_until_fear/euphoria)
     # - Confirm trigger flags are event-based (vol spike + trend break + DEFCON2/1 for fear)
-    portfolio_use_fear_euphoria: bool = Field(True, env="PORTFOLIO_USE_FEAR_EUPHORIA")
+    # Legacy overlay (fear/euphoria cycle calendar). Disabled by default now that
+    # Forecast v1 replaces the old cycle-based front-end.
+    portfolio_use_fear_euphoria: bool = Field(False, env="PORTFOLIO_USE_FEAR_EUPHORIA")
     portfolio_fear_leverage_cap: float = Field(1.0, env="PORTFOLIO_FEAR_LEVERAGE_CAP")
     portfolio_fear_risk_multiplier: float = Field(0.6, env="PORTFOLIO_FEAR_RISK_MULTIPLIER")
 

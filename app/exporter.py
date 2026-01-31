@@ -9,8 +9,7 @@ import pandas as pd
 from zoneinfo import ZoneInfo
 
 from app.portfolio import load_asset_universe, recommend_portfolio_from_px
-from app.cycles import build_cycles_from_nasdaq_daily
-from app.fear_euphoria import build_fear_euphoria_from_cycles_monthly, compute_daily_triggers
+from app.forecast_v1 import build_forecast_v1_daily, DEFAULT_SERIES
 from app.settings import get_settings
 
 CSV_HEADER = [
@@ -265,6 +264,93 @@ def export_nasdaq_1d_csv(conn, out_path: Optional[Path] = None) -> Path:
     return out_path
 
 
+def export_forecast_v1_csv(conn, out_path: Optional[Path] = None) -> Path:
+    """Export Forecast v1 probabilities (Crisis + Euphoria).
+
+    Emits:
+      - forecast_v1_daily.csv
+
+    The file is regenerated from the DB each run (no incremental merge).
+    """
+    base_dir = Path(__file__).resolve().parent.parent
+    out_path = out_path or (base_dir / "data" / "forecast_v1_daily.csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 1. Fetch raw series data directly (avoid load_asset_universe filtering)
+    # Ensure we get all DEFAULT_SERIES plus components for ratio calculation
+    target_series = set(DEFAULT_SERIES)
+    target_series.add("COPPER")
+    target_series.add("XAUUSD")
+    # Also fetch FXCM_COPPER as fallback for COPPER
+    target_series.add("FXCM_COPPER")
+
+    placeholders = ",".join("?" for _ in target_series)
+    rows = conn.execute(
+        f"""
+        SELECT series_id, time_utc_ms, value
+        FROM market_observations
+        WHERE series_id IN ({placeholders})
+        ORDER BY time_utc_ms ASC
+        """,
+        list(target_series),
+    ).fetchall()
+
+    if not rows:
+        # Create empty file with header
+        pd.DataFrame(columns=["date", "model"]).to_csv(out_path, index=False, encoding="utf-8")
+        return out_path
+
+    # 2. Pivot to wide format: index=date, columns=series_id
+    df = pd.DataFrame(rows, columns=["series_id", "time_utc_ms", "value"])
+    df["date"] = pd.to_datetime(df["time_utc_ms"], unit="ms", utc=True).dt.date
+    # Keep last value per day
+    wide = df.pivot_table(index="date", columns="series_id", values="value", aggfunc="last")
+    wide = wide.sort_index()
+
+    # 3. Data cleanup / Feature engineering
+    # Merge FXCM_COPPER into COPPER if needed
+    if "FXCM_COPPER" in wide.columns:
+        if "COPPER" in wide.columns:
+            wide["COPPER"] = wide["COPPER"].combine_first(wide["FXCM_COPPER"])
+        else:
+            wide["COPPER"] = wide["FXCM_COPPER"]
+    
+    # Calculate COPPER_GOLD_RATIO if missing or partial
+    # COPPER_GOLD_RATIO = ln(COPPER / XAUUSD) usually, or just ratio. 
+    # Check existing data range. 
+    # The existing DB likely has it pre-calculated, but filling gaps is good.
+    if "COPPER" in wide.columns and "XAUUSD" in wide.columns:
+        try:
+            # Assume ratio is simple division. If original series was log, this might be different.
+            # But typically it is Price(Copper) / Price(Gold).
+            # We'll compute it and fill gaps in existing column.
+            computed = wide["COPPER"] / wide["XAUUSD"]
+            if "COPPER_GOLD_RATIO" in wide.columns:
+                wide["COPPER_GOLD_RATIO"] = wide["COPPER_GOLD_RATIO"].combine_first(computed)
+            else:
+                wide["COPPER_GOLD_RATIO"] = computed
+        except Exception:
+            pass
+
+    # 4. Prepare inputs for forecast engine
+    asset_universe = wide.reset_index() # 'date' becomes a column
+    # Ensure date is datetime64 for merge
+    asset_universe["date"] = pd.to_datetime(asset_universe["date"])
+
+    try:
+        st = pd.read_sql_query(
+            "SELECT as_of_date AS date, state FROM daily_states ORDER BY as_of_date ASC",
+            conn,
+        )
+    except Exception:
+        st = pd.DataFrame(columns=["date", "state"])
+
+    # 5. Build Forecast
+    forecast_df, _ = build_forecast_v1_daily(asset_universe, st)
+    forecast_df.to_csv(out_path, index=False, encoding="utf-8")
+    return out_path
+
+
 def export_cycles_csv(conn, out_dir: Optional[Path] = None) -> tuple[Optional[Path], Optional[Path]]:
     """Export NASDAQ cycle indicators.
 
@@ -306,6 +392,9 @@ def export_cycles_csv(conn, out_dir: Optional[Path] = None) -> tuple[Optional[Pa
     daily = pd.to_numeric(daily, errors="coerce").dropna()
     if daily.empty:
         return None, None
+
+    # Legacy implementation (kept for rollback). Import lazily.
+    from app.cycles import build_cycles_from_nasdaq_daily
 
     cycles_m = build_cycles_from_nasdaq_daily(daily)
     if cycles_m.empty:
@@ -366,6 +455,9 @@ def export_fear_euphoria_csv(conn, out_dir: Optional[Path] = None) -> tuple[Opti
         return None, None
     if cycles_m.empty:
         return None, None
+
+    # Legacy implementation (kept for rollback). Import lazily.
+    from app.fear_euphoria import build_fear_euphoria_from_cycles_monthly, compute_daily_triggers
 
     fe_m = build_fear_euphoria_from_cycles_monthly(cycles_m)
     if fe_m.empty:
