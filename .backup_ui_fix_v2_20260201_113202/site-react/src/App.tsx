@@ -15,7 +15,6 @@ import {
 } from "recharts";
 import { format, parseISO, subYears, endOfWeek, endOfMonth } from "date-fns";
 import { useWarRoomData } from "@/hooks/useWarRoomData";
-import CycleClock from "@/components/CycleClock";
 import { cn } from "@/lib/utils";
 import { RefreshCw, Search, Filter, Maximize2, X, RotateCcw, Languages } from "lucide-react";
 import type { MarketStateRow } from "@/types";
@@ -1358,16 +1357,6 @@ export default function App() {
                     <div className="text-xs text-slate-500 mb-3">
                       {t.modeWindow}: <span className="font-mono text-slate-900">{latestTiming.crisis_mode_start && latestTiming.crisis_mode_end ? `${latestTiming.crisis_mode_start} ~ ${latestTiming.crisis_mode_end}` : "—"}</span>
                     </div>
-                    <div className="flex justify-end mb-2">
-                      <CycleClock
-                        title={t.crisis}
-                        subtitle="cycle"
-                        monthsUntil={(latestTiming as any).months_until_fear}
-                        periodMonths={(latestTiming as any).fear_period_months}
-                        confidence={(latestTiming as any).confidence_fear}
-                        size={96}
-                      />
-                    </div>
                     <div className="flex flex-wrap gap-2">
                       {([
                         ["1m", "p_crisis_within_1m"],
@@ -1396,16 +1385,6 @@ export default function App() {
                     </div>
                     <div className="text-xs text-slate-500 mb-3">
                       {t.modeWindow}: <span className="font-mono text-slate-900">{latestTiming.euphoria_mode_start && latestTiming.euphoria_mode_end ? `${latestTiming.euphoria_mode_start} ~ ${latestTiming.euphoria_mode_end}` : "—"}</span>
-                    </div>
-                    <div className="flex justify-end mb-2">
-                      <CycleClock
-                        title={t.euphoria}
-                        subtitle="cycle"
-                        monthsUntil={(latestTiming as any).months_until_euphoria}
-                        periodMonths={(latestTiming as any).euphoria_period_months}
-                        confidence={(latestTiming as any).confidence_euphoria}
-                        size={96}
-                      />
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {([

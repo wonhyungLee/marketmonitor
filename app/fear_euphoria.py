@@ -88,156 +88,218 @@ def _rolling_phase_fit(periodic_phase: pd.Series, window: int = 120) -> pd.DataF
 def build_fear_euphoria_from_cycles_monthly(
     cycles_monthly: pd.DataFrame,
     *,
-    phase_col: str = "vol_wave_10y_phase",
-    amp_col: str = "vol_wave_10y_amp",
-    fit_window_months: int = 120,
-    tol_rad: float = math.pi / 10.0,  # ~18deg window around target phase
+    fear_phase_col: str = "vol_wave_10y_phase",
+    fear_amp_col: str = "vol_wave_10y_amp",
+    euphoria_phase_col: str = "wave_3y_phase",
+    euphoria_amp_col: str = "wave_3y_amp",
+    fit_window_fear: int = 120,
+    fit_window_euphoria: int = 60,
+    tol_rad: float = math.pi / 10,
 ) -> pd.DataFrame:
-    """Build forecast windows (months-to-fear/euphoria) from cycles_monthly."""
-    if cycles_monthly is None or cycles_monthly.empty:
+    """Create month-level timing features for Fear (crisis) and Euphoria.
+
+    Key idea
+      - Fear: driven by *volatility* cycle peaks (vol_wave_10y_phase -> phase 0)
+      - Euphoria: driven by *price* cycle peaks (wave_3y_phase -> phase 0)
+
+    Output columns (monthly):
+      time,
+      months_until_fear, months_until_euphoria,
+      fear_window_24m, fear_window_36m,
+      euphoria_window_24m, euphoria_window_36m,
+      confidence_fear, confidence_euphoria,
+      fear_period_months, euphoria_period_months,
+      fear_phase, euphoria_phase
+
+    Backward compatibility: also emits `confidence` as the average of both.
+    """
+    if cycles_monthly is None or len(cycles_monthly) == 0:
         return pd.DataFrame()
 
     df = cycles_monthly.copy()
+
+    # Accept either index(time) or a 'time' column.
     if "time" in df.columns:
         df["time"] = pd.to_datetime(df["time"], errors="coerce")
-        df = df.dropna(subset=["time"]).sort_values("time").set_index("time")
+        df = df.dropna(subset=["time"]).sort_values("time")
+        df = df.set_index(df["time"].dt.to_period("M").dt.to_timestamp("M"))
     else:
-        # assume index
         df.index = pd.to_datetime(df.index, errors="coerce")
-        df = df.dropna(axis=0, how="any", subset=[]).sort_index()
+        df = df.dropna(subset=[df.index.name] if df.index.name else None)
+        df = df.sort_index()
+        df.index = df.index.to_period("M").to_timestamp("M")
 
-    ph = pd.to_numeric(df.get(phase_col), errors="coerce")
-    amp = pd.to_numeric(df.get(amp_col), errors="coerce")
-    if ph is None or ph.isna().all():
-        return pd.DataFrame()
+    # Feature columns
+    for col in [fear_phase_col, fear_amp_col, euphoria_phase_col, euphoria_amp_col]:
+        if col not in df.columns:
+            # Missing cycle feature -> cannot compute.
+            return pd.DataFrame()
 
-    fit = _rolling_phase_fit(ph.fillna(method="ffill"), window=fit_window_months)
-    omega = fit["omega"]
-    period = fit["period_months"]
-    r2 = fit["r2"]
+    fear_phase = pd.to_numeric(df[fear_phase_col], errors="coerce")
+    fear_amp = pd.to_numeric(df[fear_amp_col], errors="coerce")
 
-    # Convert phase -> months until target phase (forward time).
-    # FEAR: vol peak ~ phase 0
-    # EUPHORIA: vol trough ~ phase pi
-    target_fear = 0.0
-    target_euph = math.pi
+    euph_phase = pd.to_numeric(df[euphoria_phase_col], errors="coerce")
+    euph_amp = pd.to_numeric(df[euphoria_amp_col], errors="coerce")
 
-    # Use omega for forward phase advance; require positive omega.
-    omega_pos = omega.where(omega > 0)
+    # Helper: compute months_until + confidence from a phase/amp stream.
+    def _calc(phase: pd.Series, amp: pd.Series, *, fit_window: int, label: str) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+        phase_ff = phase.ffill()
+        fit = _rolling_phase_fit(phase_ff, window=fit_window)
 
-    # Forward diff in [0, 2pi)
-    diff_fear = ((target_fear - ph) % TWO_PI)
-    diff_euph = ((target_euph - ph) % TWO_PI)
+        omega = pd.to_numeric(fit.get("omega"), errors="coerce")
+        omega_pos = omega.where(omega > 0)
 
-    months_fear = diff_fear / omega_pos
-    months_euph = diff_euph / omega_pos
+        target = 0.0  # phase=0 means PEAK
+        diff = (target - phase_ff) % TWO_PI
+        months = diff / omega_pos
 
-    # If we are already close (within tol), treat as "now".
-    dist_fear = ph.apply(lambda v: abs(_circular_distance(float(v), target_fear)) if np.isfinite(v) else np.nan)
-    dist_euph = ph.apply(lambda v: abs(_circular_distance(float(v), target_euph)) if np.isfinite(v) else np.nan)
-    months_fear = months_fear.where(~(dist_fear <= tol_rad), other=0.0)
-    months_euph = months_euph.where(~(dist_euph <= tol_rad), other=0.0)
+        # Treat near-peak as "now".
+        dist = phase_ff.apply(lambda v: abs(_circular_distance(float(v), target)) if pd.notna(v) else float('nan'))
+        months = months.where(~(dist <= tol_rad), other=0.0)
 
-    # Confidence: amplitude strength + phase-fit quality.
-    amp_med = amp.rolling(120, min_periods=60).median()
-    amp_ratio = amp / amp_med.replace(0.0, np.nan)
-    conf_amp = ((amp_ratio - 0.7) / 0.6).clip(lower=0.0, upper=1.0)
-    conf_fit = r2.clip(lower=0.0, upper=1.0)
+        # Period in months
+        period_months = pd.to_numeric(fit.get("period_months"), errors="coerce")
+        r2 = pd.to_numeric(fit.get("r2"), errors="coerce").clip(0, 1)
 
-    conf = (0.6 * conf_amp.fillna(0.0) + 0.4 * conf_fit.fillna(0.0)).clip(0.0, 1.0)
+        # Confidence: combine amplitude stability + fit quality
+        amp_w = max(60, int(fit_window * 2))
+        amp_med = amp.rolling(amp_w, min_periods=max(30, fit_window // 2)).median()
+        amp_ratio = amp / amp_med.replace(0, float('nan'))
+        conf_amp = ((amp_ratio - 0.7) / 0.6).clip(0, 1)
+        conf = (0.6 * conf_amp.fillna(0) + 0.4 * r2.fillna(0)).clip(0, 1)
+
+        return months, period_months, r2, conf
+
+    months_until_fear, fear_period_months, fear_r2, conf_fear = _calc(
+        fear_phase, fear_amp, fit_window=fit_window_fear, label="fear"
+    )
+    months_until_euph, euph_period_months, euph_r2, conf_euph = _calc(
+        euph_phase, euph_amp, fit_window=fit_window_euphoria, label="euphoria"
+    )
+
+    # Windows: start tracking "in window" when within 24/36 months of the projected peak.
+    fear_window_24m = (months_until_fear <= 24).astype(int)
+    fear_window_36m = (months_until_fear <= 36).astype(int)
+    euphoria_window_24m = (months_until_euph <= 24).astype(int)
+    euphoria_window_36m = (months_until_euph <= 36).astype(int)
 
     out = pd.DataFrame(index=df.index)
-    out["vol_phase"] = ph
-    out["vol_amp"] = amp
-    out["period_months"] = period
-    out["period_years"] = period / 12.0
-    out["phase_fit_r2"] = r2
-    out["months_until_fear"] = months_fear
-    out["months_until_euphoria"] = months_euph
-    out["fear_window_24m"] = (months_fear <= 24).astype(int)
-    out["fear_window_36m"] = (months_fear <= 36).astype(int)
-    out["euphoria_window_24m"] = (months_euph <= 24).astype(int)
-    out["euphoria_window_36m"] = (months_euph <= 36).astype(int)
-    out["confidence"] = conf
-    return out.reset_index().rename(columns={"index": "time"})
+    out["months_until_fear"] = months_until_fear
+    out["months_until_euphoria"] = months_until_euph
 
+    out["fear_window_24m"] = fear_window_24m
+    out["fear_window_36m"] = fear_window_36m
+    out["euphoria_window_24m"] = euphoria_window_24m
+    out["euphoria_window_36m"] = euphoria_window_36m
 
-def _rolling_z(x: pd.Series, win_short: int, win_long: int) -> pd.Series:
-    """Z-score of short-window realized vol vs long-window baseline."""
-    mu = x.rolling(win_long, min_periods=max(30, win_long // 3)).mean()
-    sd = x.rolling(win_long, min_periods=max(30, win_long // 3)).std(ddof=0)
-    z = (x - mu) / sd.replace(0.0, np.nan)
-    return z
+    out["confidence_fear"] = conf_fear
+    out["confidence_euphoria"] = conf_euph
+    out["confidence"] = ((conf_fear.fillna(0) + conf_euph.fillna(0)) / 2.0).clip(0, 1)
+
+    out["fear_period_months"] = fear_period_months
+    out["euphoria_period_months"] = euph_period_months
+
+    out["fear_phase"] = fear_phase
+    out["euphoria_phase"] = euph_phase
+
+    out.index.name = "time"
+    out = out.reset_index()
+    out["time"] = out["time"].dt.date.astype(str)
+    return out
 
 
 def compute_daily_triggers(
+    *,
     daily_close: pd.Series,
     daily_state: pd.Series,
     forecast_daily: pd.DataFrame,
-    *,
-    sma_days: int = 200,
-    vol_days: int = 20,
-    vol_long_days: int = 252,
-    vol_spike_z: float = 1.0,
-    vol_low_z: float = -0.5,
-    overext_pct: float = 0.15,
-    mom_fast_days: int = 20,
-    mom_slow_days: int = 60,
+    overext_z: float = 1.6,
+    mom_fast_days: int = 21,
+    mom_slow_days: int = 126,
+    vol_days: int = 63,
+    vol_high_z: float = 0.75,
+    runup_days: int = 252,
+    runup_min: float = 0.20,
 ) -> pd.DataFrame:
-    """Compute FEAR/EUPHORIA confirm triggers on daily data."""
-    s = pd.to_numeric(daily_close, errors="coerce").dropna().sort_index()
-    if s.empty:
+    """Compute daily confirm triggers for Fear/Euphoria.
+
+    Notes
+    - Fear confirmation is macro-driven: DEFCON1/2 and volatility/trend breakdown.
+    - Euphoria confirmation is price-cycle + overextension: near predicted peak on the 3y wave,
+      with stretched price vs MA and momentum deceleration.
+    """
+    if forecast_daily is None or forecast_daily.empty:
+        return pd.DataFrame()
+
+    px = pd.to_numeric(daily_close, errors="coerce")
+    px = px.dropna()
+    if px.empty:
         return pd.DataFrame(index=forecast_daily.index)
 
-    px = s.reindex(forecast_daily.index).ffill()
-    sma = px.rolling(sma_days, min_periods=max(50, sma_days // 3)).mean()
+    # Align index
+    idx = pd.DatetimeIndex(forecast_daily.index)
+    px = px.reindex(idx).ffill()
+
+    # 1) Basic features
+    sma = px.rolling(200, min_periods=100).mean()
+    overext = (px / sma) - 1.0
+    overext_zs = (overext - overext.rolling(252, min_periods=126).mean()) / (overext.rolling(252, min_periods=126).std())
+
+    mom_fast = px.pct_change(mom_fast_days)
+    mom_slow = px.pct_change(mom_slow_days)
+    mom_decel = (mom_fast < 0) & (mom_slow > 0)
+
+    vol = px.pct_change().rolling(vol_days, min_periods=max(10, vol_days // 3)).std() * (252 ** 0.5)
+    vol_z = (vol - vol.rolling(252, min_periods=126).mean()) / (vol.rolling(252, min_periods=126).std())
+
+    # Run-up context (12m)
+    runup = px.pct_change(runup_days)
+    runup_flag = runup > float(runup_min)
+
+    # Trend break: below SMA200
     trend_break = (px < sma)
-    overext = (px / sma - 1.0)
-    overext_flag = overext > float(overext_pct)
 
-    ret = px.pct_change(fill_method=None)
-    vol = ret.rolling(vol_days, min_periods=max(10, vol_days // 2)).std(ddof=0) * math.sqrt(252)
-    vol_z = _rolling_z(vol, win_short=vol_days, win_long=vol_long_days)
-    vol_spike = vol_z > float(vol_spike_z)
-    vol_low = vol_z < float(vol_low_z)
+    # Macro risk from daily_state (DEFCON1/2)
+    st = daily_state.copy()
+    st.index = pd.to_datetime(st.index, errors="coerce")
+    st = st.reindex(idx).ffill()
+    macro_risk = st.isin(["DEFCON1", "DEFCON2"]).astype(int)
 
-    mom_fast = px.pct_change(mom_fast_days, fill_method=None)
-    mom_slow = px.pct_change(mom_slow_days, fill_method=None)
-    mom_decel = (mom_slow > 0) & (mom_fast > 0) & (mom_fast < mom_slow)
+    # 2) Window flags from forecast (monthly -> daily ffill)
+    close_to_peak = pd.to_numeric(forecast_daily.get("months_until_euphoria"), errors="coerce")
+    close_to_fear = pd.to_numeric(forecast_daily.get("months_until_fear"), errors="coerce")
 
-    st = daily_state.reindex(forecast_daily.index).fillna(method="ffill")
-    macro_risk = st.isin(["DEFCON2", "DEFCON1"])
+    fear_window_24m = pd.to_numeric(forecast_daily.get("fear_window_24m"), errors="coerce").fillna(0).astype(int)
+    fear_window_36m = pd.to_numeric(forecast_daily.get("fear_window_36m"), errors="coerce").fillna(0).astype(int)
+    euph_window_24m = pd.to_numeric(forecast_daily.get("euphoria_window_24m"), errors="coerce").fillna(0).astype(int)
+    euph_window_36m = pd.to_numeric(forecast_daily.get("euphoria_window_36m"), errors="coerce").fillna(0).astype(int)
 
-    fear_window = forecast_daily.get("fear_window_36m", 0).astype(bool)
-    euph_window = forecast_daily.get("euphoria_window_36m", 0).astype(bool)
+    # 3) Confirm triggers
+    # Fear: macro risk + (trend break OR vol spike)
+    fear_trigger = (macro_risk > 0) & (trend_break | (vol_z > 1.0))
 
-    fear_base = fear_window & vol_spike & trend_break & macro_risk
-    # Tiered FEAR severity (0-3) only when base trigger is ON.
-    # L1: base trigger
-    # L2: base + (DEFCON1 or stronger vol spike or closer-to-peak)
-    # L3: base + (DEFCON1 and strong vol spike)
-    st_u = st.astype(str).str.upper()
-    is_def1 = st_u.eq('DEFCON1')
-    close_to_peak = pd.to_numeric(forecast_daily.get('months_until_fear'), errors='coerce') <= 12
-    strong_vol = vol_z >= (float(vol_spike_z) + 0.5)
-    vstrong_vol = vol_z >= (float(vol_spike_z) + 1.0)
-    fear_level = (fear_base.astype(int) * 1)
-    fear_level = fear_level + (fear_base & (is_def1 | strong_vol | close_to_peak)).astype(int)
-    fear_level = fear_level + (fear_base & is_def1 & vstrong_vol).astype(int)
-    fear_level = fear_level.clip(lower=0, upper=3)
-    fear_trigger = fear_level > 0
+    # Euphoria: near predicted peak window + stretched + deceleration + decent run-up, but avoid high-vol panic
+    vol_ok = (vol_z <= float(vol_high_z))
+    overext_flag = (overext_zs > float(overext_z))
 
-    euph_base = euph_window & vol_low & overext_flag & mom_decel
-    close_to_trough = pd.to_numeric(forecast_daily.get('months_until_euphoria'), errors='coerce') <= 12
-    very_low_vol = vol_z <= (float(vol_low_z) - 0.5)
-    strong_overext = overext >= (float(overext_pct) * 1.5)
-    euphoria_level = (euph_base.astype(int) * 1)
-    euphoria_level = euphoria_level + (euph_base & (very_low_vol | strong_overext | close_to_trough)).astype(int)
-    euphoria_level = euphoria_level + (euph_base & very_low_vol & strong_overext).astype(int)
-    euphoria_level = euphoria_level.clip(lower=0, upper=3)
-    euph_trigger = euphoria_level > 0
+    # Tighten near-term: within 12 months of predicted peak if available
+    near_peak = (close_to_peak <= 12.0) if close_to_peak is not None else pd.Series(False, index=idx)
 
-    out = pd.DataFrame(index=forecast_daily.index)
+    euph_trigger = (euph_window_36m > 0) & vol_ok & overext_flag & mom_decel & runup_flag
+    euph_trigger = euph_trigger | ((euph_window_24m > 0) & vol_ok & overext_flag & mom_decel)
+    euph_trigger = euph_trigger | (near_peak & vol_ok & overext_flag & mom_decel)
+
+    # Levels for UI (0..3)
+    fear_level = (macro_risk.astype(int) + (trend_break.astype(int)) + ((vol_z > 1.0).astype(int))).clip(0, 3)
+
+    # Euphoria levels: combine distance to peak, overextension, and run-up
+    euphoria_level = (
+        (near_peak.astype(int))
+        + (overext_flag.astype(int))
+        + ((runup > 0.35).astype(int))
+    ).clip(0, 3)
+
+    out = pd.DataFrame(index=idx)
     out["nasdaq_close"] = px
     out["nasdaq_sma"] = sma
     out["nasdaq_overext"] = overext
@@ -245,6 +307,7 @@ def compute_daily_triggers(
     out["nasdaq_mom_slow"] = mom_slow
     out["vol_ann"] = vol
     out["vol_z"] = vol_z
+    out["runup_12m"] = runup
     out["trend_break"] = trend_break.astype(int)
     out["overext_flag"] = overext_flag.astype(int)
     out["mom_decel"] = mom_decel.astype(int)
@@ -262,6 +325,12 @@ class FearEuphoriaSnapshot:
     months_until_fear: Optional[float]
     months_until_euphoria: Optional[float]
     confidence: Optional[float]
+    confidence_fear: Optional[float]
+    confidence_euphoria: Optional[float]
+    fear_period_months: Optional[float]
+    euphoria_period_months: Optional[float]
+    fear_phase: Optional[float]
+    euphoria_phase: Optional[float]
     fear_window_24m: Optional[int]
     fear_window_36m: Optional[int]
     euphoria_window_24m: Optional[int]
@@ -306,6 +375,12 @@ def load_fear_euphoria_snapshot(
         months_until_fear=_safe_float(row.get("months_until_fear")),
         months_until_euphoria=_safe_float(row.get("months_until_euphoria")),
         confidence=_safe_float(row.get("confidence")),
+        confidence_fear=_safe_float(row.get("confidence_fear")) or _safe_float(row.get("confidence")),
+        confidence_euphoria=_safe_float(row.get("confidence_euphoria")) or _safe_float(row.get("confidence")),
+        fear_period_months=_safe_float(row.get("fear_period_months")),
+        euphoria_period_months=_safe_float(row.get("euphoria_period_months")),
+        fear_phase=_safe_float(row.get("fear_phase")),
+        euphoria_phase=_safe_float(row.get("euphoria_phase")),
         fear_window_24m=_safe_int(row.get("fear_window_24m")),
         fear_window_36m=_safe_int(row.get("fear_window_36m")),
         euphoria_window_24m=_safe_int(row.get("euphoria_window_24m")),

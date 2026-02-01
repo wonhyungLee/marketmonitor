@@ -15,7 +15,6 @@ import {
 } from "recharts";
 import { format, parseISO, subYears, endOfWeek, endOfMonth } from "date-fns";
 import { useWarRoomData } from "@/hooks/useWarRoomData";
-import CycleClock from "@/components/CycleClock";
 import { cn } from "@/lib/utils";
 import { RefreshCw, Search, Filter, Maximize2, X, RotateCcw, Languages } from "lucide-react";
 import type { MarketStateRow } from "@/types";
@@ -406,16 +405,6 @@ export default function App() {
     return { data: sampled };
   }, [data?.forecastV1, dateRange.start, dateRange.end, forecastHorizon]);
 
-
-
-  const fmtPct = (v: any) => {
-    if (typeof v !== "number" || !Number.isFinite(v)) return "—";
-    const pct = v * 100;
-    if (pct === 0) return "0%";
-    if (pct < 1) return "<1%";
-    if (pct > 99) return ">99%";
-    return `${Math.round(pct)}%`;
-  };
 
   const latestTiming = useMemo(() => {
     const rows = data?.timingV1 || [];
@@ -1358,26 +1347,16 @@ export default function App() {
                     <div className="text-xs text-slate-500 mb-3">
                       {t.modeWindow}: <span className="font-mono text-slate-900">{latestTiming.crisis_mode_start && latestTiming.crisis_mode_end ? `${latestTiming.crisis_mode_start} ~ ${latestTiming.crisis_mode_end}` : "—"}</span>
                     </div>
-                    <div className="flex justify-end mb-2">
-                      <CycleClock
-                        title={t.crisis}
-                        subtitle="cycle"
-                        monthsUntil={(latestTiming as any).months_until_fear}
-                        periodMonths={(latestTiming as any).fear_period_months}
-                        confidence={(latestTiming as any).confidence_fear}
-                        size={96}
-                      />
-                    </div>
                     <div className="flex flex-wrap gap-2">
                       {([
-                        ["1m", "p_crisis_within_1m"],
-                        ["3m", "p_crisis_within_3m"],
-                        ["6m", "p_crisis_within_6m"],
-                        ["1y", "p_crisis_within_1y"],
-                        ["2y", "p_crisis_within_2y"],
+                        ["1m", "p_crisis_1m"],
+                        ["3m", "p_crisis_3m"],
+                        ["6m", "p_crisis_6m"],
+                        ["1y", "p_crisis_1y"],
+                        ["2y", "p_crisis_2y"],
                       ] as const).map(([label, key]) => {
                         const v = (latestTiming as any)[key];
-                        const txt = fmtPct(v);
+                        const txt = typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "—";
                         return (
                           <span key={key} className="px-2 py-1 rounded-lg text-xs font-bold bg-red-50 text-red-700 border border-red-100">
                             {t.within} {label}: {txt}
@@ -1397,25 +1376,15 @@ export default function App() {
                     <div className="text-xs text-slate-500 mb-3">
                       {t.modeWindow}: <span className="font-mono text-slate-900">{latestTiming.euphoria_mode_start && latestTiming.euphoria_mode_end ? `${latestTiming.euphoria_mode_start} ~ ${latestTiming.euphoria_mode_end}` : "—"}</span>
                     </div>
-                    <div className="flex justify-end mb-2">
-                      <CycleClock
-                        title={t.euphoria}
-                        subtitle="cycle"
-                        monthsUntil={(latestTiming as any).months_until_euphoria}
-                        periodMonths={(latestTiming as any).euphoria_period_months}
-                        confidence={(latestTiming as any).confidence_euphoria}
-                        size={96}
-                      />
-                    </div>
                     <div className="flex flex-wrap gap-2">
                       {([
-                        ["1w", "p_euphoria_within_1w"],
-                        ["1m", "p_euphoria_within_1m"],
-                        ["3m", "p_euphoria_within_3m"],
-                        ["6m", "p_euphoria_within_6m"],
+                        ["1w", "p_euphoria_1w"],
+                        ["1m", "p_euphoria_1m"],
+                        ["3m", "p_euphoria_3m"],
+                        ["6m", "p_euphoria_6m"],
                       ] as const).map(([label, key]) => {
                         const v = (latestTiming as any)[key];
-                        const txt = fmtPct(v);
+                        const txt = typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "—";
                         return (
                           <span key={key} className="px-2 py-1 rounded-lg text-xs font-bold bg-green-50 text-green-700 border border-green-100">
                             {t.within} {label}: {txt}

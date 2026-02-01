@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from app.portfolio import load_asset_universe, recommend_portfolio_from_px
 from app.forecast_v1 import build_forecast_v1_daily, DEFAULT_SERIES
-from app.timing_v1 import export_timing_v1_daily
+from app.timing_v1 import build_timing_v1_daily
 from app.settings import get_settings
 
 CSV_HEADER = [
@@ -357,21 +357,75 @@ def export_forecast_v1_csv(conn, out_path: Optional[Path] = None) -> Path:
 def export_timing_v1_csv(conn, out_path: Path | None = None) -> Path:
     """Export Timing v1 (when will events begin?)
 
-    Delegates to app.timing_v1.export_timing_v1_daily which reads from CSV.
-    The 'conn' argument is ignored but kept for compatibility with run_daily.py.
+    Emits:
+      - timing_v1_daily.csv
+
+    The file is regenerated from the DB each run (no incremental merge).
     """
     base_dir = Path(__file__).resolve().parent.parent
-    data_dir = base_dir / "data"
-    out_path = out_path or (data_dir / "timing_v1_daily.csv")
+    out_path = out_path or (base_dir / "data" / "timing_v1_daily.csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Delegate to the new file-based exporter
-    res = export_timing_v1_daily(data_dir=data_dir, out_name=out_path.name)
+    # Fetch raw series needed for feature engineering.
+    target_series = set(DEFAULT_SERIES)
+    target_series.add("COPPER")
+    target_series.add("XAUUSD")
+    target_series.add("FXCM_COPPER")
 
-    if res is None:
-        # Fallback: create empty file if generation failed
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.touch()
+    placeholders = ",".join("?" for _ in target_series)
+    rows = conn.execute(
+        f"""
+        SELECT series_id, time_utc_ms, value
+        FROM market_observations
+        WHERE series_id IN ({placeholders})
+        ORDER BY time_utc_ms ASC
+        """,
+        list(target_series),
+    ).fetchall()
 
+    if not rows:
+        # Create empty file with header
+        import pandas as pd
+        pd.DataFrame(columns=["date"]).to_csv(out_path, index=False, encoding="utf-8")
+        return out_path
+
+    import pandas as pd
+    df = pd.DataFrame(rows, columns=["series_id", "time_utc_ms", "value"])
+    df["date"] = pd.to_datetime(df["time_utc_ms"], unit="ms", utc=True).dt.date
+    wide = df.pivot_table(index="date", columns="series_id", values="value", aggfunc="last")
+    wide = wide.sort_index()
+
+    # FXCM_COPPER -> COPPER fallback
+    if "FXCM_COPPER" in wide.columns:
+        if "COPPER" in wide.columns:
+            wide["COPPER"] = wide["COPPER"].combine_first(wide["FXCM_COPPER"])
+        else:
+            wide["COPPER"] = wide["FXCM_COPPER"]
+
+    # COPPER_GOLD_RATIO fill
+    if "COPPER" in wide.columns and "XAUUSD" in wide.columns:
+        try:
+            computed = wide["COPPER"] / wide["XAUUSD"]
+            if "COPPER_GOLD_RATIO" in wide.columns:
+                wide["COPPER_GOLD_RATIO"] = wide["COPPER_GOLD_RATIO"].combine_first(computed)
+            else:
+                wide["COPPER_GOLD_RATIO"] = computed
+        except Exception:
+            pass
+
+    asset_universe = wide.reset_index()
+    asset_universe["date"] = pd.to_datetime(asset_universe["date"])
+
+    try:
+        st = pd.read_sql_query(
+            "SELECT as_of_date AS date, state FROM daily_states ORDER BY as_of_date ASC",
+            conn,
+        )
+    except Exception:
+        st = pd.DataFrame(columns=["date", "state"])
+
+    timing_df = build_timing_v1_daily(asset_universe, st)
+    timing_df.to_csv(out_path, index=False, encoding="utf-8")
     return out_path
 
 def export_cycles_csv(conn, out_dir: Optional[Path] = None) -> tuple[Optional[Path], Optional[Path]]:
@@ -434,8 +488,6 @@ def export_cycles_csv(conn, out_dir: Optional[Path] = None) -> tuple[Optional[Pa
         "risk_multiplier",
         "price_cycle_z",
         "vol_z",
-        "wave_3y",
-        "wave_3y_phase",
         "wave_7y",
         "wave_7y_phase",
         "vol_wave_10y",

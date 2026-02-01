@@ -54,36 +54,22 @@ export interface TimingV1Row {
   status_crisis?: string;
   status_euphoria?: string;
 
-  // Snapshot (optional)
-  crisis_now?: number | null;
-  euphoria_now?: number | null;
-
-  // Cycle-clock helpers (optional)
-  months_until_fear?: number | null;
-  months_until_euphoria?: number | null;
-  confidence_fear?: number | null;
-  confidence_euphoria?: number | null;
-  fear_period_months?: number | null;
-  euphoria_period_months?: number | null;
-  fear_phase?: number | null;
-  euphoria_phase?: number | null;
-
   // Cumulative probabilities: "event begins within X"
-  p_crisis_within_1m: number | null;
-  p_crisis_within_3m: number | null;
-  p_crisis_within_6m: number | null;
-  p_crisis_within_1y: number | null;
-  p_crisis_within_2y: number | null;
-  p_crisis_within_3y: number | null;
-  p_crisis_within_5y: number | null;
-  p_crisis_within_10y: number | null;
+  p_crisis_1m: number | null;
+  p_crisis_3m: number | null;
+  p_crisis_6m: number | null;
+  p_crisis_1y: number | null;
+  p_crisis_2y: number | null;
+  p_crisis_3y: number | null;
+  p_crisis_5y: number | null;
+  p_crisis_10y: number | null;
 
-  p_euphoria_within_1w: number | null;
-  p_euphoria_within_1m: number | null;
-  p_euphoria_within_3m: number | null;
-  p_euphoria_within_6m: number | null;
-  p_euphoria_within_1y: number | null;
-  p_euphoria_within_2y: number | null;
+  p_euphoria_1w: number | null;
+  p_euphoria_1m: number | null;
+  p_euphoria_3m: number | null;
+  p_euphoria_6m: number | null;
+  p_euphoria_1y: number | null;
+  p_euphoria_2y: number | null;
 
   // ETA + mode window
   eta_crisis_median_days: number | null;

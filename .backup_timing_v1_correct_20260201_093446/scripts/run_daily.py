@@ -12,8 +12,6 @@ from app.exporter import (
     backup_daily_states_csv,
     export_forecast_v1_csv,
     export_timing_v1_csv,
-    export_cycles_csv,
-    export_fear_euphoria_csv,
     export_asset_universe_csv,
     export_daily_states_csv,
     export_nasdaq_1d_csv,
@@ -113,8 +111,6 @@ def run_daily_job(
                     export_nasdaq_1d_csv(conn)
                     export_asset_universe_csv(conn)
                     export_forecast_v1_csv(conn)
-                    export_cycles_csv(conn)
-                    export_fear_euphoria_csv(conn)
                     export_timing_v1_csv(conn)
                     # Portfolio export depends on cycle / fear-euphoria snapshots.
                     export_portfolio_recent_csv(conn, days=window_days, end_date=end_date)

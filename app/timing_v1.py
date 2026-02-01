@@ -126,8 +126,10 @@ def build_timing_from_fear_euphoria_daily(fe_d: pd.DataFrame) -> pd.DataFrame:
     fe_d = fe_d.reset_index(drop=True)
 
     # Inputs
-    conf = _safe_float(fe_d.get("confidence", pd.Series([0.3]*len(fe_d))), default=0.3)
-    sigma = _sigma_from_conf(conf)
+    conf_fear = _safe_float(fe_d.get("confidence_fear", fe_d.get("confidence", pd.Series([0.3]*len(fe_d)))), default=0.3)
+    conf_euph = _safe_float(fe_d.get("confidence_euphoria", fe_d.get("confidence", pd.Series([0.3]*len(fe_d)))), default=0.3)
+    sigma_fear = _sigma_from_conf(conf_fear)
+    sigma_euph = _sigma_from_conf(conf_euph)
 
     months_fear = _safe_float(fe_d.get("months_until_fear", pd.Series([np.nan]*len(fe_d))))
     months_euph = _safe_float(fe_d.get("months_until_euphoria", pd.Series([np.nan]*len(fe_d))))
@@ -152,6 +154,12 @@ def build_timing_from_fear_euphoria_daily(fe_d: pd.DataFrame) -> pd.DataFrame:
     status_crisis = np.where(np.isfinite(months_fear), "OK", "NO_FEATURES")
     status_euphoria = np.where(np.isfinite(months_euph), "OK", "NO_FEATURES")
 
+    # Confidence gates (low confidence -> keep outputs but mark status)
+    FEAR_CONF_GATE = 0.25
+    EUPH_CONF_GATE = 0.30
+    status_crisis = np.where((status_crisis == "OK") & (conf_fear < FEAR_CONF_GATE), "LOW_CONF", status_crisis)
+    status_euphoria = np.where((status_euphoria == "OK") & (conf_euph < EUPH_CONF_GATE), "LOW_CONF", status_euphoria)
+
     # Trigger/macro boost
     med_fear = _apply_trigger_boost(med_fear, fear_trigger, fear_level, macro_risk)
     med_euph = _apply_trigger_boost(med_euph, euph_trigger, euph_level, 0*macro_risk)
@@ -166,23 +174,23 @@ def build_timing_from_fear_euphoria_daily(fe_d: pd.DataFrame) -> pd.DataFrame:
 
     p_crisis = {}
     for k, h in CRISIS_H.items():
-        p = cdf_at(h, mu_fear, sigma)
+        p = cdf_at(h, mu_fear, sigma_fear)
         p = np.where(crisis_now == 1, 1.0, p)
         p = np.where(status_crisis == "NO_FEATURES", np.nan, p)
         p_crisis[k] = np.clip(p, 0.0, 1.0)
 
     p_euph = {}
     for k, h in EUPH_H.items():
-        p = cdf_at(h, mu_euph, sigma)
+        p = cdf_at(h, mu_euph, sigma_euph)
         p = np.where(euphoria_now == 1, 1.0, p)
         p = np.where(status_euphoria == "NO_FEATURES", np.nan, p)
         p_euph[k] = np.clip(p, 0.0, 1.0)
 
     # Likely window: central 50% interval [q25, q75] in days
-    q25_f = np.exp(mu_fear + sigma * Z25)
-    q75_f = np.exp(mu_fear + sigma * Z75)
-    q25_e = np.exp(mu_euph + sigma * Z25)
-    q75_e = np.exp(mu_euph + sigma * Z75)
+    q25_f = np.exp(mu_fear + sigma_fear * Z25)
+    q75_f = np.exp(mu_fear + sigma_fear * Z75)
+    q25_e = np.exp(mu_euph + sigma_euph * Z25)
+    q75_e = np.exp(mu_euph + sigma_euph * Z75)
 
     # Clamp and round
     q25_f = np.maximum(0.0, q25_f)
@@ -201,6 +209,16 @@ def build_timing_from_fear_euphoria_daily(fe_d: pd.DataFrame) -> pd.DataFrame:
     out["status_euphoria"] = status_euphoria
     out["crisis_now"] = crisis_now
     out["euphoria_now"] = euphoria_now
+
+    # Cycle-clock helpers (copied from fear_euphoria_daily if available)
+    out["months_until_fear"] = pd.to_numeric(fe_d.get("months_until_fear"), errors="coerce")
+    out["months_until_euphoria"] = pd.to_numeric(fe_d.get("months_until_euphoria"), errors="coerce")
+    out["confidence_fear"] = pd.to_numeric(fe_d.get("confidence_fear", conf_fear), errors="coerce")
+    out["confidence_euphoria"] = pd.to_numeric(fe_d.get("confidence_euphoria", conf_euph), errors="coerce")
+    out["fear_period_months"] = pd.to_numeric(fe_d.get("fear_period_months"), errors="coerce")
+    out["euphoria_period_months"] = pd.to_numeric(fe_d.get("euphoria_period_months"), errors="coerce")
+    out["fear_phase"] = pd.to_numeric(fe_d.get("fear_phase"), errors="coerce")
+    out["euphoria_phase"] = pd.to_numeric(fe_d.get("euphoria_phase"), errors="coerce")
 
     # Attach within probs with the exact column names expected by the frontend
     out["p_crisis_within_1m"] = p_crisis["1m"]

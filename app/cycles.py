@@ -36,7 +36,7 @@ def _to_monthly_last_close(daily: pd.Series) -> pd.Series:
     if s.empty:
         return pd.Series(dtype="float64")
     s = s.sort_index()
-    return s.resample("M").last().dropna()
+    return s.resample("ME").last().dropna()
 
 
 def _rolling_zscore(x: pd.Series, window: int) -> pd.Series:
@@ -149,6 +149,8 @@ class CycleSnapshot:
     risk_multiplier: float
     price_cycle_z: Optional[float]
     vol_z: Optional[float]
+    wave_3y: Optional[float]
+    wave_3y_phase: Optional[float]
     wave_7y: Optional[float]
     wave_7y_phase: Optional[float]
     vol_wave_10y: Optional[float]
@@ -161,6 +163,7 @@ def build_cycles_from_nasdaq_daily(
     price_trend_months: int = 120,
     vol_smooth_months: int = 12,
     phase_window_months: int = 240,
+    phase_window_short_months: int = 120,
 ) -> pd.DataFrame:
     """Return a monthly DataFrame with cycle indicators.
 
@@ -197,8 +200,19 @@ def build_cycles_from_nasdaq_daily(
     df["vol_z"] = _rolling_zscore(df["vol_12m"], window=price_trend_months)
 
     # Medium/long waves and phases (rolling FFT band-pass + Hilbert)
+    # Short/medium wave (~3y) on price_cycle (2–4y band)
+    wave_3y, wave_3y_phase, wave_3y_amp = _rolling_bandpass_phase(
+        df["price_cycle"].ffill(),
+        window=phase_window_short_months,
+        min_period=12 * 2.0,
+        max_period=12 * 4.0,
+    )
+    df["wave_3y"] = wave_3y
+    df["wave_3y_phase"] = wave_3y_phase
+    df["wave_3y_amp"] = wave_3y_amp
+
     wave_7y, wave_7y_phase, wave_7y_amp = _rolling_bandpass_phase(
-        df["price_cycle"].fillna(method="ffill"),
+        df["price_cycle"].ffill(),
         window=phase_window_months,
         min_period=12 * 5.0,
         max_period=12 * 9.0,
@@ -208,7 +222,7 @@ def build_cycles_from_nasdaq_daily(
     df["wave_7y_amp"] = wave_7y_amp
 
     vol_wave_10y, vol_wave_10y_phase, vol_wave_10y_amp = _rolling_bandpass_phase(
-        df["vol_12m"].fillna(method="ffill"),
+        df["vol_12m"].ffill(),
         window=phase_window_months,
         min_period=12 * 8.0,
         max_period=12 * 14.0,
@@ -285,6 +299,8 @@ def load_cycle_snapshot(
         risk_multiplier=float(row.get("risk_multiplier", 1.0) or 1.0),
         price_cycle_z=_safe_float(row.get("price_cycle_z")),
         vol_z=_safe_float(row.get("vol_z")),
+        wave_3y=_safe_float(row.get("wave_3y")),
+        wave_3y_phase=_safe_float(row.get("wave_3y_phase")),
         wave_7y=_safe_float(row.get("wave_7y")),
         wave_7y_phase=_safe_float(row.get("wave_7y_phase")),
         vol_wave_10y=_safe_float(row.get("vol_wave_10y")),
