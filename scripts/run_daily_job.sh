@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/home/dldnjsrk/remote-ubuntu/시장감지모델"
+# Portable runner.
+# You can override PROJECT_ROOT or PYTHON if needed.
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+PYTHON="${PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
 
-cd "$ROOT"
-export PYTHONPATH="$ROOT"
+cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT"
 
-"$ROOT/.venv/bin/python" "$ROOT/scripts/run_daily.py" --window-days 7
+"$PYTHON" "$PROJECT_ROOT/scripts/run_daily.py"

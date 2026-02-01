@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import * as Papa from "papaparse";
 import { addDays, format, parseISO } from "date-fns";
 import { fetchCsv } from "@/lib/utils";
-import type { DashboardData, MarketStateRow, NasdaqRow, PortfolioRow, ForecastV1Row } from "@/types";
+import type { DashboardData, MarketStateRow, NasdaqRow, PortfolioRow, ForecastV1Row, TimingV1Row } from "@/types";
 
 const URLS = {
   // Use absolute paths to ensure correct fetching regardless of current route
@@ -10,6 +10,7 @@ const URLS = {
   nasdaq: "/data/nasdaq_dly_ixic_1d.csv",
   portfolio: "/data/portfolio_daily.csv",
   forecastV1: "/data/forecast_v1_daily.csv",
+  timingV1: "/data/timing_v1_daily.csv",
 };
 
 function parseStateRow(row: any): MarketStateRow {
@@ -53,6 +54,41 @@ function parseForecastV1Row(row: any): ForecastV1Row {
   };
 }
 
+function parseTimingV1Row(row: any): TimingV1Row {
+  return {
+    date: row.date || "",
+    model: row.model || "timing_v1",
+    status_crisis: row.status_crisis,
+    status_euphoria: row.status_euphoria,
+
+    p_crisis_1m: toNum(row.p_crisis_1m),
+    p_crisis_3m: toNum(row.p_crisis_3m),
+    p_crisis_6m: toNum(row.p_crisis_6m),
+    p_crisis_1y: toNum(row.p_crisis_1y),
+    p_crisis_2y: toNum(row.p_crisis_2y),
+    p_crisis_3y: toNum(row.p_crisis_3y),
+    p_crisis_5y: toNum(row.p_crisis_5y),
+    p_crisis_10y: toNum(row.p_crisis_10y),
+
+    p_euphoria_1w: toNum(row.p_euphoria_1w),
+    p_euphoria_1m: toNum(row.p_euphoria_1m),
+    p_euphoria_3m: toNum(row.p_euphoria_3m),
+    p_euphoria_6m: toNum(row.p_euphoria_6m),
+    p_euphoria_1y: toNum(row.p_euphoria_1y),
+    p_euphoria_2y: toNum(row.p_euphoria_2y),
+
+    eta_crisis_median_days: toNum(row.eta_crisis_median_days),
+    eta_crisis_median_date: row.eta_crisis_median_date || null,
+    crisis_mode_start: row.crisis_mode_start || null,
+    crisis_mode_end: row.crisis_mode_end || null,
+
+    eta_euphoria_median_days: toNum(row.eta_euphoria_median_days),
+    eta_euphoria_median_date: row.eta_euphoria_median_date || null,
+    euphoria_mode_start: row.euphoria_mode_start || null,
+    euphoria_mode_end: row.euphoria_mode_end || null,
+  };
+}
+
 function parsePortfolioRow(row: any): PortfolioRow {
   const weights = [];
   for (const k of Object.keys(row)) {
@@ -79,16 +115,18 @@ export function useWarRoomData() {
     setLoading(true);
     setError(null);
     try {
-      const [csvStates, csvNasdaq, csvPortfolio, csvForecast] = await Promise.allSettled([
+      const [csvStates, csvNasdaq, csvPortfolio, csvForecast, csvTiming] = await Promise.allSettled([
         fetchCsv(URLS.states),
         fetchCsv(URLS.nasdaq),
         fetchCsv(URLS.portfolio),
         fetchCsv(URLS.forecastV1),
+        fetchCsv(URLS.timingV1),
       ]);
 
       let states: MarketStateRow[] = [];
       let nasdaq: NasdaqRow[] = [];
       let forecastV1: ForecastV1Row[] | undefined = undefined;
+      let timingV1: TimingV1Row[] | undefined = undefined;
       const portfolio = new Map<string, PortfolioRow>();
 
       if (csvStates.status === "fulfilled") {
@@ -117,10 +155,19 @@ export function useWarRoomData() {
       }
       if (csvForecast.status === "fulfilled") {
         const parsed = Papa.parse(csvForecast.value, { header: true, skipEmptyLines: true });
-        forecastV1 = (parsed.data as any[]).map(parseForecastV1Row).filter((r) => r.date).sort((a, b) => (a.date < b.date ? -1 : 1));
+        forecastV1 = (parsed.data as any[])
+          .map(parseForecastV1Row)
+          .filter((r) => r.date)
+          .sort((a, b) => (a.date < b.date ? -1 : 1));
       }
 
-
+      if (csvTiming.status === "fulfilled") {
+        const parsed = Papa.parse(csvTiming.value, { header: true, skipEmptyLines: true });
+        timingV1 = (parsed.data as any[])
+          .map(parseTimingV1Row)
+          .filter((r) => r.date)
+          .sort((a, b) => (a.date < b.date ? -1 : 1));
+      }
 
       // Determine date range
       let minDate = "2020-01-01";
@@ -143,6 +190,7 @@ export function useWarRoomData() {
         nasdaq,
         portfolio,
         forecastV1,
+        timingV1,
         minDate,
         maxDate: extendedMax,
       });

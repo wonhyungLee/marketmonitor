@@ -549,6 +549,24 @@ def _write_sqlite(db_path: Path, rows: List[Tuple[str, str, Optional[float], str
         conn.close()
 
 
+def _resolve_data_dir(data_dir: Path) -> Path:
+    """Resolve indicator data directory.
+
+    If the provided path does not exist, try auto-detection (supports legacy
+    zip-escaped folder names like '#Uc9c0#Ud45c...').
+    """
+    if data_dir.exists():
+        return data_dir
+    try:
+        from app.paths import repo_root, find_indicator_dir
+        cand = find_indicator_dir(repo_root())
+        if cand.exists():
+            return cand
+    except Exception:
+        pass
+    return data_dir
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backtest WarRoom v2.0 Hybrid daily states from CSV exports")
     parser.add_argument("--data-dir", type=Path, default=Path("지표데이터"), help="directory containing CSV exports")
@@ -558,7 +576,7 @@ def main() -> None:
     args = parser.parse_args()
 
     t0 = time.time()
-    series = _load_series(args.data_dir)
+    series = _load_series(_resolve_data_dir(args.data_dir))
 
     # Determine end date from data (unless provided)
     max_dates = [sd.dates[-1] for sd in series.values() if sd.dates]

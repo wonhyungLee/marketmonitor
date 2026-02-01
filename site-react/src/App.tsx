@@ -71,6 +71,11 @@ const TRANSLATIONS = {
     from: "from",
     forecastTitle: "Forecast (Crisis & Euphoria)",
     forecastSub: "Probabilities that the market will be in crisis (risk-off) or euphoria (overheat) in H years",
+    timingTitle: "Timing (When)",
+    timingSub: "Estimated start window and cumulative probabilities",
+    eta: "ETA (median)",
+    modeWindow: "Likely window",
+    within: "Within",
     horizon: "Horizon",
     crisis: "Crisis",
     euphoria: "Euphoria",
@@ -115,6 +120,11 @@ const TRANSLATIONS = {
     from: "데이터 기준:",
     forecastTitle: "전망 (위기 & 환희)",
     forecastSub: "H년 뒤 시장이 위기(리스크오프) 또는 환희(과열) 상태일 확률",
+    timingTitle: "시기 전망 (언제?)",
+    timingSub: "위기/환희 시작 시기(윈도우) 및 누적확률",
+    eta: "예상 시점(중앙값)",
+    modeWindow: "유력 구간",
+    within: "이내",
     horizon: "기간",
     crisis: "위기",
     euphoria: "환희",
@@ -394,6 +404,13 @@ export default function App() {
     });
     return { data: sampled };
   }, [data?.forecastV1, dateRange.start, dateRange.end, forecastHorizon]);
+
+
+  const latestTiming = useMemo(() => {
+    const rows = data?.timingV1 || [];
+    if (!rows || rows.length === 0) return null;
+    return rows[rows.length - 1];
+  }, [data?.timingV1]);
 
 
   // Filter Data
@@ -1288,6 +1305,97 @@ export default function App() {
             </section>
 
 
+
+
+
+            {/* Timing v1 (When) */}
+            <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 relative group transition-all hover:shadow-md">
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <h2 className="text-lg font-bold text-slate-900">{t.timingTitle}</h2>
+                  <p className="text-xs text-slate-500">{t.timingSub}</p>
+                </div>
+                {latestTiming ? (
+                  <div className="flex items-center gap-2">
+                    {latestTiming.status_crisis && latestTiming.status_crisis !== "OK" && (
+                      <span className="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700 border border-amber-200">
+                        {latestTiming.status_crisis}
+                      </span>
+                    )}
+                    {latestTiming.status_euphoria && latestTiming.status_euphoria !== "OK" && (
+                      <span className="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700 border border-amber-200">
+                        {latestTiming.status_euphoria}
+                      </span>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+
+              {!latestTiming ? (
+                <div className="text-sm text-slate-500">
+                  No timing data loaded (expected: <span className="font-mono">data/timing_v1_daily.csv</span>)
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="rounded-xl border border-slate-100 p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="font-bold text-slate-900">{t.crisis}</div>
+                      <div className="text-xs text-slate-500">
+                        {t.eta}: <span className="font-mono text-slate-900">{latestTiming.eta_crisis_median_date || "—"}</span>
+                      </div>
+                    </div>
+                    <div className="text-xs text-slate-500 mb-3">
+                      {t.modeWindow}: <span className="font-mono text-slate-900">{latestTiming.crisis_mode_start && latestTiming.crisis_mode_end ? `${latestTiming.crisis_mode_start} ~ ${latestTiming.crisis_mode_end}` : "—"}</span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {([
+                        ["1m", "p_crisis_1m"],
+                        ["3m", "p_crisis_3m"],
+                        ["6m", "p_crisis_6m"],
+                        ["1y", "p_crisis_1y"],
+                        ["2y", "p_crisis_2y"],
+                      ] as const).map(([label, key]) => {
+                        const v = (latestTiming as any)[key];
+                        const txt = typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "—";
+                        return (
+                          <span key={key} className="px-2 py-1 rounded-lg text-xs font-bold bg-red-50 text-red-700 border border-red-100">
+                            {t.within} {label}: {txt}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-100 p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="font-bold text-slate-900">{t.euphoria}</div>
+                      <div className="text-xs text-slate-500">
+                        {t.eta}: <span className="font-mono text-slate-900">{latestTiming.eta_euphoria_median_date || "—"}</span>
+                      </div>
+                    </div>
+                    <div className="text-xs text-slate-500 mb-3">
+                      {t.modeWindow}: <span className="font-mono text-slate-900">{latestTiming.euphoria_mode_start && latestTiming.euphoria_mode_end ? `${latestTiming.euphoria_mode_start} ~ ${latestTiming.euphoria_mode_end}` : "—"}</span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {([
+                        ["1w", "p_euphoria_1w"],
+                        ["1m", "p_euphoria_1m"],
+                        ["3m", "p_euphoria_3m"],
+                        ["6m", "p_euphoria_6m"],
+                      ] as const).map(([label, key]) => {
+                        const v = (latestTiming as any)[key];
+                        const txt = typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "—";
+                        return (
+                          <span key={key} className="px-2 py-1 rounded-lg text-xs font-bold bg-green-50 text-green-700 border border-green-100">
+                            {t.within} {label}: {txt}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </section>
 
             {/* Forecast v1 (Crisis + Euphoria) */}
             <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 relative group transition-all hover:shadow-md">

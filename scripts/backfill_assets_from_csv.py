@@ -1,17 +1,31 @@
-import sys
-from pathlib import Path
-import pandas as pd
-import sqlite3
+"""Backfill a multi-asset CSV into the WarRoom SQLite DB.
+
+Target input (by default): `지표데이터/투자자산모음.csv`
+
+This is optional. The portfolio builder can also read the CSV directly,
+but backfilling is useful if you want all assets in `warroom.db`.
+"""
+
+from __future__ import annotations
+
 import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
-# Add project root to path
+import pandas as pd
+
 BASE_DIR = Path(__file__).resolve().parent.parent
-sys.path.append(str(BASE_DIR))
+# Allow running from anywhere
+sys.path.insert(0, str(BASE_DIR))
 
-from app import db, settings
+from app import db  # noqa: E402
+from app.paths import find_indicator_dir  # noqa: E402
+from app.settings import get_settings  # noqa: E402
+
 
 def _read_csv_any_encoding(path: Path) -> pd.DataFrame:
-    last_err = None
+    last_err: Exception | None = None
     for enc in ("utf-8-sig", "utf-8", "cp949"):
         try:
             return pd.read_csv(path, encoding=enc)
@@ -21,28 +35,37 @@ def _read_csv_any_encoding(path: Path) -> pd.DataFrame:
         raise last_err
     return pd.read_csv(path)
 
-def main():
-    s = settings.get_settings()
-    db_path = BASE_DIR / s.db_path
-    
-    # Locate asset CSV
-    csv_path = BASE_DIR / "지표데이터" / "투자자산모음.csv"
+
+def _resolve_db_path(raw: str) -> Path:
+    p = Path(raw)
+    return p if p.is_absolute() else (BASE_DIR / p)
+
+
+def main() -> None:
+    try:
+        s = get_settings()
+        db_path = _resolve_db_path(s.db_path)
+    except Exception:
+        # Allow running without .env (WEBHOOK_TOKEN is required in server settings).
+        db_path = BASE_DIR / 'warroom.db'
+
+    indicator_dir = find_indicator_dir(BASE_DIR)
+    csv_path = indicator_dir / "투자자산모음.csv"
     if not csv_path.exists():
         print(f"Error: Asset CSV not found at {csv_path}")
         return
 
     print(f"Reading asset data from {csv_path}...")
     df = _read_csv_any_encoding(csv_path)
-    
-    # Normalize Date
+
     if "time" not in df.columns:
         print("Error: CSV must have 'time' column")
         return
+
     df["time"] = pd.to_datetime(df["time"], errors="coerce")
     df = df.dropna(subset=["time"]).sort_values("time")
 
-    # Map CSV columns to DB series_ids
-    # CSV Column -> DB Series ID
+    # CSV prefix -> canonical series_id
     col_map = {
         "BTCUSD": "BTCUSD",
         "XAUUSD": "XAUUSD",
@@ -51,59 +74,70 @@ def main():
         "REMX": "REMX",
         "ALUMINUM": "ALUMINUM",
         "URANIUM": "URANIUM",
-        "US10Y": "US10Y", # Yields
+        # Yields
+        "US10Y": "US10Y",
         "US02Y": "US02Y",
     }
-    
-    # Find which columns actually exist in CSV
-    target_cols = {}
+
+    # Detect matching columns (handles cases like "BTCUSD · INDEX: close")
+    target_cols: dict[str, str] = {}
     for col in df.columns:
-        for key, sid in col_map.items():
-            if str(col).startswith(key): # Handle prefixes like BTCUSD...
-                target_cols[col] = sid
+        if col == "time":
+            continue
+        col_str = str(col)
+        for prefix, sid in col_map.items():
+            if col_str.startswith(prefix):
+                target_cols[col_str] = sid
                 break
-    
+
+    if not target_cols:
+        print("No backfillable asset columns found in CSV.")
+        return
+
     print(f"Found columns to backfill: {target_cols}")
 
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    total_inserted = 0
-    
+    now_iso = datetime.now(tz=timezone.utc).isoformat()
+    batch: list[tuple[str, int, str, float, str, str]] = []
+
     for _, row in df.iterrows():
-        dt = row["time"]
-        # UTC midnight timestamp in ms
-        ts_ms = int(dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-        
+        dt = row["time"].to_pydatetime()
+        # Use 00:00 UTC for the date.
+        dt_utc = datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc)
+        ts_ms = int(dt_utc.timestamp() * 1000)
+
         for col, series_id in target_cols.items():
-            val = row[col]
+            val = row.get(col)
             if pd.isna(val):
                 continue
-                
-            val = float(val)
-            
-            # Insert into DB
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO market_observations
-                (series_id, time_utc_ms, interval, value, received_at, payload_json)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    series_id,
-                    ts_ms,
-                    "1D",
-                    val,
-                    dt.isoformat(), # approximate received_at
-                    json.dumps({"source": "backfill_csv", "origin_col": col})
-                )
+            try:
+                fval = float(val)
+            except Exception:
+                continue
+
+            payload_json = json.dumps(
+                {"source": "backfill_csv", "origin_col": col},
+                ensure_ascii=False,
             )
-            total_inserted += 1
-            
-    conn.commit()
-    conn.close()
-    
-    print(f"Done! Inserted/Updated {total_inserted} records into {db_path}")
+            batch.append((series_id, ts_ms, "1D", fval, now_iso, payload_json))
+
+    if not batch:
+        print("Nothing to insert (all values empty/invalid).")
+        return
+
+    with db.db_session(str(db_path)) as conn:
+        db.init_db(conn)
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO market_observations
+            (series_id, time_utc_ms, interval, value, received_at, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """,
+            batch,
+        )
+        conn.commit()
+
+    print(f"Done! Inserted/Updated {len(batch)} records into {db_path}")
+
 
 if __name__ == "__main__":
     main()

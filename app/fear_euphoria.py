@@ -111,7 +111,7 @@ def build_fear_euphoria_from_cycles_monthly(
     if ph is None or ph.isna().all():
         return pd.DataFrame()
 
-    fit = _rolling_phase_fit(ph.ffill(), window=fit_window_months)
+    fit = _rolling_phase_fit(ph.fillna(method="ffill"), window=fit_window_months)
     omega = fit["omega"]
     period = fit["period_months"]
     r2 = fit["r2"]
@@ -205,7 +205,7 @@ def compute_daily_triggers(
     mom_slow = px.pct_change(mom_slow_days, fill_method=None)
     mom_decel = (mom_slow > 0) & (mom_fast > 0) & (mom_fast < mom_slow)
 
-    st = daily_state.reindex(forecast_daily.index).ffill()
+    st = daily_state.reindex(forecast_daily.index).fillna(method="ffill")
     macro_risk = st.isin(["DEFCON2", "DEFCON1"])
 
     fear_window = forecast_daily.get("fear_window_36m", 0).astype(bool)

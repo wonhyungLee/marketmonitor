@@ -36,7 +36,7 @@ def _to_monthly_last_close(daily: pd.Series) -> pd.Series:
     if s.empty:
         return pd.Series(dtype="float64")
     s = s.sort_index()
-    return s.resample("ME").last().dropna()
+    return s.resample("M").last().dropna()
 
 
 def _rolling_zscore(x: pd.Series, window: int) -> pd.Series:
@@ -198,7 +198,7 @@ def build_cycles_from_nasdaq_daily(
 
     # Medium/long waves and phases (rolling FFT band-pass + Hilbert)
     wave_7y, wave_7y_phase, wave_7y_amp = _rolling_bandpass_phase(
-        df["price_cycle"].ffill(),
+        df["price_cycle"].fillna(method="ffill"),
         window=phase_window_months,
         min_period=12 * 5.0,
         max_period=12 * 9.0,
@@ -208,7 +208,7 @@ def build_cycles_from_nasdaq_daily(
     df["wave_7y_amp"] = wave_7y_amp
 
     vol_wave_10y, vol_wave_10y_phase, vol_wave_10y_amp = _rolling_bandpass_phase(
-        df["vol_12m"].ffill(),
+        df["vol_12m"].fillna(method="ffill"),
         window=phase_window_months,
         min_period=12 * 8.0,
         max_period=12 * 14.0,

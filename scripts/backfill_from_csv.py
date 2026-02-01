@@ -19,7 +19,7 @@ FILENAME_SERIES_MAP: Dict[str, str] = {
     "FRED_WEI": "WEI",
     "FRED_SAHMREALTIME": "SAHMREALTIME",
     "FRED_UMCSENT": "UMCSENT",
-    "CAPITALCOM_US100": "US100",
+    "CAPITALCOM_US100": "COMBINED",
     "NASDAQ_DLY_IXIC": "COMBINED",
 }
 
@@ -209,6 +209,24 @@ def backfill(data_dir: Path) -> None:
             print(f"ingested {csv_file.name} -> {series_id} ({count} rows)")
 
 
+def _resolve_data_dir(data_dir: Path) -> Path:
+    """Resolve indicator data directory.
+
+    If the provided path does not exist, try auto-detection (supports legacy
+    zip-escaped folder names like '#Uc9c0#Ud45c...').
+    """
+    if data_dir.exists():
+        return data_dir
+    try:
+        from app.paths import repo_root, find_indicator_dir
+        cand = find_indicator_dir(repo_root())
+        if cand.exists():
+            return cand
+    except Exception:
+        pass
+    return data_dir
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill CSV data into warroom db")
     parser.add_argument(
@@ -218,7 +236,7 @@ def main() -> None:
         help="directory containing CSV exports",
     )
     args = parser.parse_args()
-    backfill(args.data_dir)
+    backfill(_resolve_data_dir(args.data_dir))
 
 
 if __name__ == "__main__":

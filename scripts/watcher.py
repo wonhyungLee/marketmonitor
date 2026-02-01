@@ -27,7 +27,7 @@ def main():
                 env["PYTHONPATH"] = str(BASE_DIR)
                 
                 result = subprocess.run(
-                    [sys.executable, str(RUN_SCRIPT), "--window-days", "7"],
+                    [sys.executable, str(RUN_SCRIPT)],
                     cwd=str(BASE_DIR),
                     env=env,
                     capture_output=True,
@@ -50,3 +50,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -10,9 +9,6 @@ from app import db
 from app.settings import get_settings
 from app.snapshot import build_snapshot
 from app.portfolio import recommend_portfolio
-
-
-logger = logging.getLogger("warroom.engine")
 
 
 def _raw_score_from_state_row(row) -> Optional[float]:
@@ -289,24 +285,6 @@ def evaluate(conn, as_of_date: Optional[date] = None, data_frame=None) -> Engine
                 "cash_weight": rec.cash_weight,
                 "weights": rec.weights,
             }
-            try:
-                db.upsert_portfolio_daily(
-                    conn=conn,
-                    as_of_date=str(snapshot.as_of_date),
-                    portfolio_date=rec.portfolio_date,
-                    state=state,
-                    model=rec.model,
-                    target_vol_ann=rec.target_vol_ann,
-                    vol_window_days=rec.vol_window_days,
-                    ma_window_days=rec.ma_window_days,
-                    leverage_cap=rec.leverage_cap,
-                    gross_exposure=rec.gross_exposure,
-                    cash_weight=rec.cash_weight,
-                    created_at=datetime.now(tz=timezone.utc).isoformat(),
-                )
-                db.replace_portfolio_weights(conn, str(snapshot.as_of_date), rec.weights)
-            except Exception:
-                logger.warning("failed to persist portfolio recommendation", exc_info=True)
     except Exception:
         # Portfolio rec is best-effort; never block core state generation.
         pass
