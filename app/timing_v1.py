@@ -1,554 +1,262 @@
 from __future__ import annotations
 
-"""Timing Engine v1: *When* will Crisis / Euphoria start?
-
-This engine complements forecast_v1 ("H years ahead") by estimating
-*when* an event is likely to *begin*.
-
-Approach (v1)
--------------
-We train a family of regularized logistic models for cumulative timing targets:
-
-  y_H(t) = 1 if the next *enter* event occurs within the next H trading days
-           (t+1 .. t+H), conditional on not already being in the event at t.
-
-This yields cumulative probabilities P(T <= H). From these, we derive:
-  - Median ETA (approx.): earliest horizon where P(T<=H) >= 0.5
-  - Mode window (approx.): horizon interval with the largest incremental mass
+"""
+Timing v1 (fixed): estimate WHEN Crisis/Fear and Euphoria/Overheat are likely to START.
 
 Design goals
-------------
-* Minimal dependencies (NumPy/Pandas only; mirrors forecast_v1 style)
-* No silent "0.5" fallbacks: missing features/training -> NaN + status
-* Conservative euphoria probabilities (stronger regularization + temperature)
+- Work directly off exported `data/fear_euphoria_daily.csv` (cycle windows + trigger flags).
+- Produce `data/timing_v1_daily.csv` with:
+    * within-horizon probabilities (cumulative)
+    * ETA median date
+    * "likely window" (central 50% interval)
 
-Limitations
------------
-This is an approximate timing model (cumulative classification, not full hazard).
-It is intentionally simple for robustness and easy maintenance.
+This is intentionally lightweight (NumPy/Pandas only).
+It does NOT fit ML models; it converts cycle "months_until_*" + confidence + trigger boosts
+into a probability distribution over time using a lognormal time-to-event model.
+
+Why lognormal?
+- positive support (days >= 0)
+- simple analytic CDF and quantiles without SciPy
 """
 
+import math
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Dict, Iterable, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-from app.forecast_v1 import DEFAULT_SERIES, LOG_SERIES, EUPHORIA_RULE
+SQRT2 = math.sqrt(2.0)
 
+# Normal quantiles for central 50% window (25% and 75%)
+Z25 = -0.6744897501960817
+Z75 =  0.6744897501960817
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-# Trading-day horizons used for cumulative timing targets.
-CRISIS_HORIZONS: Dict[str, int] = {
+# Horizon mapping in trading days (approx).
+CRISIS_H = {
     "1m": 21,
     "3m": 63,
     "6m": 126,
     "1y": 252,
-    "2y": 252 * 2,
-    "3y": 252 * 3,
-    "5y": 252 * 5,
-    "10y": 252 * 10,
+    "2y": 504,
+    "3y": 756,
+    "5y": 1260,
+    "10y": 2520,
 }
-
-EUPHORIA_HORIZONS: Dict[str, int] = {
+EUPH_H = {
     "1w": 5,
     "1m": 21,
     "3m": 63,
     "6m": 126,
     "1y": 252,
-    "2y": 252 * 2,
+    "2y": 504,
 }
 
-MIN_TRAIN_ROWS = 600  # below this: WARMUP
+def _as_date_col(df: pd.DataFrame) -> pd.Series:
+    """Accept either `date` or `time` column. Return pd.Timestamp series."""
+    if "date" in df.columns:
+        s = pd.to_datetime(df["date"], errors="coerce")
+    elif "time" in df.columns:
+        s = pd.to_datetime(df["time"], errors="coerce")
+    else:
+        # assume index
+        s = pd.to_datetime(df.index, errors="coerce")
+    return s
 
-# Stronger regularization to avoid 0/1 saturation for euphoria.
-L2_CRISIS = 1.0
-L2_EUPHORIA = 10.0
-# Temperature scaling for euphoria (soften logits; >1 reduces confidence)
-TEMP_EUPHORIA = 2.0
+def _erf_vec(x: np.ndarray) -> np.ndarray:
+    """Vectorized erf using math.erf (fast enough for ~1e5 calls)."""
+    # np.vectorize wraps Python loop; still fine here.
+    return np.vectorize(math.erf, otypes=[float])(x)
 
+def _lognormal_cdf(x_days: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> np.ndarray:
+    """CDF of lognormal at x (x>0)."""
+    x = np.maximum(x_days, 1e-12)
+    z = (np.log(x) - mu) / (sigma * SQRT2)
+    return 0.5 * (1.0 + _erf_vec(z))
 
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
-
-
-def _safe_log(s: pd.Series) -> pd.Series:
-    x = pd.to_numeric(s, errors="coerce").astype(float)
-    out = np.full(len(x), np.nan, dtype=float)
-    mask = np.isfinite(x) & (x > 0)
-    out[mask] = np.log(x.to_numpy()[mask])
-    return pd.Series(out, index=s.index)
-
-
-def _zscore_trailing(x: pd.Series, win: int) -> pd.Series:
-    mu = x.rolling(win, min_periods=max(10, win // 3)).mean()
-    sd = x.rolling(win, min_periods=max(10, win // 3)).std(ddof=0)
-    return (x - mu) / sd.replace(0.0, np.nan)
-
-
-def _build_cycle_features(
-    df: pd.DataFrame,
-    series: Sequence[str],
-    *,
-    long_win: int = 252 * 3,
-    slope_win: int = 21,
-    vol_win: int = 63,
-) -> pd.DataFrame:
-    out = pd.DataFrame(index=df.index)
-    for sid in series:
-        if sid not in df.columns:
-            continue
-        x0 = df[sid]
-        x = _safe_log(x0) if sid in LOG_SERIES else pd.to_numeric(x0, errors="coerce")
-        x = x.astype(float).ffill()
-
-        trend = x.rolling(long_win, min_periods=max(20, long_win // 2)).mean()
-        resid = x - trend
-        resid_sd = resid.rolling(long_win, min_periods=max(20, long_win // 2)).std(ddof=0)
-        cycle_z = resid / resid_sd.replace(0.0, np.nan)
-
-        slope1m = cycle_z.diff(slope_win)
-
-        dx = x.diff()
-        vol = dx.rolling(vol_win, min_periods=max(10, vol_win // 2)).std(ddof=0)
-        vol_z = _zscore_trailing(vol, long_win)
-
-        out[f"{sid}__cycle_z"] = cycle_z
-        out[f"{sid}__slope1m"] = slope1m
-        out[f"{sid}__vol_z"] = vol_z
-
+def _safe_float(s: pd.Series, default: float = float("nan")) -> np.ndarray:
+    out = pd.to_numeric(s, errors="coerce").to_numpy(dtype=float).copy()
+    if not np.isfinite(default):
+        return out
+    out[~np.isfinite(out)] = default
     return out
 
-
-def _sigmoid(z: np.ndarray) -> np.ndarray:
-    z = np.clip(z, -35, 35)
-    return 1.0 / (1.0 + np.exp(-z))
-
-
-def _fit_logistic_irls(
-    X: np.ndarray,
-    y: np.ndarray,
-    *,
-    l2: float = 1.0,
-    max_iter: int = 50,
-    tol: float = 1e-6,
-) -> Tuple[np.ndarray, float]:
-    n, p = X.shape
-    if n == 0 or p == 0:
-        return np.zeros(p), 0.0
-
-    pos = float(np.sum(y == 1))
-    neg = float(np.sum(y == 0))
-    p0 = (pos + 1.0) / (pos + neg + 2.0)
-    b = float(np.log(p0 / (1.0 - p0)))
-    w = np.zeros(p)
-    I = np.eye(p)
-
-    last_ll = None
-    for _ in range(max_iter):
-        eta = X @ w + b
-        p_hat = _sigmoid(eta)
-
-        W = p_hat * (1.0 - p_hat)
-        W = np.clip(W, 1e-9, None)
-        z = eta + (y - p_hat) / (p_hat * (1.0 - p_hat) + 1e-12)
-
-        Xw = X * np.sqrt(W)[:, None]
-        zw = z * np.sqrt(W)
-
-        wsum = float(np.sum(W))
-        if wsum <= 0:
-            break
-
-        # Center to separate intercept
-        X_mean = np.sum(Xw, axis=0) / np.sqrt(wsum)
-        z_mean = np.sum(zw) / np.sqrt(wsum)
-
-        Xc = Xw - (np.sqrt(W)[:, None] * (X_mean / np.sqrt(wsum)))
-        zc = zw - (np.sqrt(W) * (z_mean / np.sqrt(wsum)))
-
-        A = Xc.T @ Xc + l2 * I
-        rhs = Xc.T @ zc
-        try:
-            w_new = np.linalg.solve(A, rhs)
-        except np.linalg.LinAlgError:
-            w_new = np.linalg.lstsq(A, rhs, rcond=None)[0]
-
-        b_new = (np.sum(W * (z - X @ w_new)) / np.sum(W)).item()
-
-        dw = np.max(np.abs(w_new - w))
-        db = abs(b_new - b)
-        w, b = w_new, float(b_new)
-
-        ll = float(np.sum(y * np.log(p_hat + 1e-12) + (1 - y) * np.log(1 - p_hat + 1e-12)))
-        ll -= 0.5 * l2 * float(np.sum(w * w))
-        if last_ll is not None and abs(ll - last_ll) < tol:
-            break
-        last_ll = ll
-
-        if max(dw, db) < 1e-5:
-            break
-
-    return w, b
-
-
-@dataclass
-class LogisticModel:
-    feature_cols: List[str]
-    coef: np.ndarray
-    intercept: float
-    medians: np.ndarray
-    means: np.ndarray
-    stds: np.ndarray
-    l2: float
-
-
-def _prep_X(frame: pd.DataFrame, feature_cols: List[str]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    X = frame[feature_cols].to_numpy(dtype=float)
-    medians = np.nanmedian(X, axis=0)
-    X_imp = np.where(np.isfinite(X), X, medians)
-    means = X_imp.mean(axis=0)
-    stds = X_imp.std(axis=0)
-    stds = np.where(stds > 1e-12, stds, 1.0)
-    X_std = (X_imp - means) / stds
-    return X_std, medians, means, stds
-
-
-def _predict(model: LogisticModel, frame: pd.DataFrame, *, temperature: float = 1.0) -> np.ndarray:
-    X = frame[model.feature_cols].to_numpy(dtype=float)
-    X_imp = np.where(np.isfinite(X), X, model.medians)
-    X_std = (X_imp - model.means) / model.stds
-    eta = (X_std @ model.coef + model.intercept) / max(1e-9, float(temperature))
-    return _sigmoid(eta)
-
-
-def _compute_euphoria_now(feat: pd.DataFrame) -> pd.Series:
-    # 1 if all rule thresholds satisfied; else 0. Missing -> 0.
-    ok = pd.Series(True, index=feat.index)
-    for col, thr in EUPHORIA_RULE.items():
-        if col not in feat.columns:
-            ok &= False
-            continue
-        ok &= (feat[col].astype(float) >= float(thr))
-    return ok.fillna(False).astype(int)
-
-
-def _enter_event(now: pd.Series) -> pd.Series:
-    prev = now.shift(1).fillna(0).astype(int)
-    return ((now.astype(int) == 1) & (prev == 0)).astype(int)
-
-
-def _within_horizon(enter: np.ndarray, H: int) -> np.ndarray:
-    # enter is 0/1 array. y[t]=1 if any enter in next H days.
-    n = enter.size
-    y = np.zeros(n, dtype=int)
-    if n == 0:
-        return y
-    # Rolling max over forward window using convolution-style trick
-    # For robustness, use cumulative sum.
-    cs = np.cumsum(enter, dtype=int)
-    for i in range(n):
-        j = min(n - 1, i + H)
-        # next window is (i+1..j)
-        lo = i
-        hi = j
-        s = cs[hi] - (cs[lo] if lo >= 0 else 0)
-        if i == 0:
-            # cs[hi] - 0 counts [0..hi], but we want [1..hi]
-            s = cs[hi] - enter[0]
-        else:
-            # cs[hi]-cs[i] counts (i+1..hi)
-            s = cs[hi] - cs[i]
-        y[i] = 1 if s > 0 else 0
-    return y
-
-
-def _derive_eta_and_window(
-    date_index: pd.DatetimeIndex,
-    p_cum: Dict[str, float],
-    horizons: Dict[str, int],
-) -> Tuple[Optional[int], Optional[str], Optional[str]]:
-    """Return (median_days, mode_start_date, mode_end_date) for a single row."""
-    # Sort horizons by days
-    items = sorted(horizons.items(), key=lambda kv: kv[1])
-    Hs = [d for _, d in items]
-    Ps = [float(p_cum.get(k, np.nan)) for k, _ in items]
-
-    # ensure finite
-    if not np.any(np.isfinite(Ps)):
-        return None, None, None
-
-    # Make nondecreasing (monotonic) for stability
-    Pm = []
-    m = -np.inf
-    for p in Ps:
-        if not np.isfinite(p):
-            Pm.append(np.nan)
-            continue
-        m = max(m, p)
-        Pm.append(m)
-
-    # increments
-    inc = []
-    prev = 0.0
-    for p in Pm:
-        if not np.isfinite(p):
-            inc.append(np.nan)
-            continue
-        inc.append(max(0.0, p - prev))
-        prev = p
-
-    # mode window = max incremental mass
-    inc_arr = np.array([v if np.isfinite(v) else -1 for v in inc], dtype=float)
-    mode_i = int(np.argmax(inc_arr)) if inc_arr.size else 0
-
-    start_days = 1 if mode_i == 0 else (Hs[mode_i - 1] + 1)
-    end_days = Hs[mode_i]
-
-    # median ETA: find first horizon crossing 0.5
-    median_days: Optional[int] = None
-    if np.isfinite(Pm[-1]) and Pm[-1] >= 0.5:
-        prev_h = 0
-        prev_p = 0.0
-        for h, p in zip(Hs, Pm):
-            if not np.isfinite(p):
-                continue
-            if p >= 0.5:
-                # linear interpolate between (prev_h, prev_p) and (h,p)
-                if p == prev_p:
-                    median_days = int(h)
-                else:
-                    frac = (0.5 - prev_p) / (p - prev_p)
-                    median_days = int(round(prev_h + frac * (h - prev_h)))
-                break
-            prev_h, prev_p = h, p
-
-    # convert window to dates (based on last date in index, but caller supplies date)
-    # Here we return offsets only; caller will convert.
-    # We'll return date strings directly for convenience.
-    # date_index is 1-length index in our use.
-    base = date_index[0]
-    mode_start_date = (base + pd.Timedelta(days=int(start_days))).date().isoformat()
-    mode_end_date = (base + pd.Timedelta(days=int(end_days))).date().isoformat()
-
-    return median_days, mode_start_date, mode_end_date
-
-
-def _fit_models_for_event(
-    features: pd.DataFrame,
-    now: pd.Series,
-    horizons: Dict[str, int],
-    *,
-    l2: float,
-) -> Tuple[Dict[str, Optional[LogisticModel]], str]:
-    """Fit one cumulative model per horizon. Returns (models, status)."""
-    # Candidate feature columns: keep only those referenced by the euphoria rule + core cycles.
-    # For stability: use cycle_z + slope + vol for DEFAULT_SERIES
-    feature_cols = [c for c in features.columns if any(s in c for s in ("__cycle_z", "__slope1m", "__vol_z"))]
-    if not feature_cols:
-        return {k: None for k in horizons.keys()}, "NO_FEATURES"
-
-    frame = features.copy()
-    frame["now"] = now.astype(int).to_numpy()
-
-    # event enter
-    enter = _enter_event(now).to_numpy(dtype=int)
-
-    # Train only on rows where not in event now
-    elig = (now.astype(int) == 0)
-    frame_elig = frame.loc[elig].copy()
-    if frame_elig.empty or len(frame_elig) < MIN_TRAIN_ROWS:
-        return {k: None for k in horizons.keys()}, "WARMUP"
-
-    models: Dict[str, Optional[LogisticModel]] = {}
-
-    for key, H in horizons.items():
-        y = _within_horizon(enter, H)
-        y = pd.Series(y, index=features.index)
-        y_elig = y.loc[elig]
-
-        # Need labels available: y_elig is defined for all, but becomes less meaningful near end where
-        # future is unknown. We approximate by removing last H days from training.
-        if len(y_elig) <= H + 10:
-            models[key] = None
-            continue
-        train_mask = y_elig.index <= y_elig.index[-(H + 1)]
-        train = frame_elig.loc[train_mask]
-        y_train = y_elig.loc[train_mask].to_numpy(dtype=int)
-
-        if len(train) < MIN_TRAIN_ROWS:
-            models[key] = None
-            continue
-
-        if np.unique(y_train).size < 2:
-            models[key] = None
-            continue
-
-        X_std, med, mu, sd = _prep_X(train, feature_cols)
-        w, b = _fit_logistic_irls(X_std, y_train, l2=l2)
-
-        models[key] = LogisticModel(
-            feature_cols=feature_cols,
-            coef=w,
-            intercept=b,
-            medians=med,
-            means=mu,
-            stds=sd,
-            l2=l2,
-        )
-
-    any_model = any(m is not None for m in models.values())
-    status = "OK" if any_model else "WARMUP"
-    return models, status
-
-
-def build_timing_v1_daily(
-    asset_universe: pd.DataFrame,
-    states: pd.DataFrame,
-) -> pd.DataFrame:
-    """Build daily timing probabilities + ETA windows.
-
-    asset_universe must have columns:
-      - date (datetime)
-      - raw series columns (e.g., DEFAULT_SERIES)
-
-    states must have columns:
-      - date (datetime)
-      - state (str)
-
-    Returns a DataFrame with one row per trading day.
+def _sigma_from_conf(conf: np.ndarray) -> np.ndarray:
     """
+    Convert confidence [0,1] to lognormal sigma.
+    High confidence -> narrow distribution.
+    """
+    c = np.clip(conf, 0.0, 1.0)
+    return 0.25 + (1.00 * (1.0 - c))  # 0.25..1.25
 
-    if asset_universe is None or asset_universe.empty:
-        return pd.DataFrame(columns=["date", "model", "status_crisis", "status_euphoria"])
+def _median_days_from_months(months: np.ndarray, *, floor_days: int) -> np.ndarray:
+    # trading-day-ish conversion: 21 days per month
+    md = months * 21.0
+    md = np.where(np.isfinite(md), md, np.nan)
+    md = np.maximum(md, float(floor_days))
+    return md
 
-    df = asset_universe.copy()
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date"]).sort_values("date")
-    df = df.set_index("date")
+def _apply_trigger_boost(median_days: np.ndarray, trigger: np.ndarray, level: np.ndarray, macro_risk: np.ndarray) -> np.ndarray:
+    """
+    Make ETA sooner when trigger or macro risk is present.
+    This doesn't flip the model into 'now' (that is handled by *_now flags),
+    but it increases near-term probability.
+    """
+    trig = (trigger > 0) | (level > 0) | (macro_risk > 0)
+    # Pull median closer by up to 70% when trig is ON.
+    factor = np.where(trig, 0.35, 1.0)
+    return np.maximum(1.0, median_days * factor)
 
-    feat = _build_cycle_features(df, DEFAULT_SERIES)
+def build_timing_from_fear_euphoria_daily(fe_d: pd.DataFrame) -> pd.DataFrame:
+    """
+    fe_d: exported fear_euphoria_daily.csv (daily, forward-filled monthly cycle features + triggers)
 
-    # Crisis now from states
-    st = states.copy() if states is not None else pd.DataFrame(columns=["date", "state"])
-    if not st.empty:
-        st["date"] = pd.to_datetime(st["date"], errors="coerce")
-        st = st.dropna(subset=["date"]).sort_values("date")
-        st = st.set_index("date")
-    crisis_now = pd.Series(0, index=feat.index)
-    if not st.empty and "state" in st.columns:
-        crisis_now = st["state"].reindex(feat.index).ffill().fillna("WARMUP")
-        crisis_now = crisis_now.isin(["DEFCON2", "DEFCON1"]).astype(int)
+    Returns DataFrame matching timing_v1_daily.csv schema expected by the frontend patch:
+      date, model, status_*, *_now, p_*_within_*, eta_*_median_days, *_mode_start/end, eta_*_median_date
+    """
+    if fe_d is None or fe_d.empty:
+        return pd.DataFrame()
 
-    euphoria_now = _compute_euphoria_now(feat)
+    dt = _as_date_col(fe_d)
+    fe_d = fe_d.copy()
+    fe_d["__date"] = dt
+    fe_d = fe_d.dropna(subset=["__date"]).sort_values("__date")
+    fe_d = fe_d.reset_index(drop=True)
 
-    # Fit models
-    crisis_models, crisis_status = _fit_models_for_event(feat, crisis_now, CRISIS_HORIZONS, l2=L2_CRISIS)
-    euphoria_models, euphoria_status = _fit_models_for_event(feat, euphoria_now, EUPHORIA_HORIZONS, l2=L2_EUPHORIA)
+    # Inputs
+    conf = _safe_float(fe_d.get("confidence", pd.Series([0.3]*len(fe_d))), default=0.3)
+    sigma = _sigma_from_conf(conf)
 
-    out = pd.DataFrame(index=feat.index)
-    out["date"] = out.index.date.astype(str)
-    out["model"] = "timing_v1"
-    out["status_crisis"] = crisis_status
-    out["status_euphoria"] = euphoria_status
-    out["crisis_now"] = crisis_now.astype(int).to_numpy()
-    out["euphoria_now"] = euphoria_now.astype(int).to_numpy()
+    months_fear = _safe_float(fe_d.get("months_until_fear", pd.Series([np.nan]*len(fe_d))))
+    months_euph = _safe_float(fe_d.get("months_until_euphoria", pd.Series([np.nan]*len(fe_d))))
 
-    # Predict cumulative probabilities
-    for key, H in CRISIS_HORIZONS.items():
-        col = f"p_crisis_within_{key}"
-        m = crisis_models.get(key)
-        if m is None:
-            out[col] = np.nan
-        else:
-            out[col] = _predict(m, feat)
+    fear_trigger = _safe_float(fe_d.get("fear_trigger", pd.Series([0]*len(fe_d))), default=0.0)
+    euph_trigger = _safe_float(fe_d.get("euphoria_trigger", pd.Series([0]*len(fe_d))), default=0.0)
+    fear_level = _safe_float(fe_d.get("fear_level", pd.Series([0]*len(fe_d))), default=0.0)
+    euph_level = _safe_float(fe_d.get("euphoria_level", pd.Series([0]*len(fe_d))), default=0.0)
+    macro_risk = _safe_float(fe_d.get("macro_risk", pd.Series([0]*len(fe_d))), default=0.0)
 
-    for key, H in EUPHORIA_HORIZONS.items():
-        col = f"p_euphoria_within_{key}"
-        m = euphoria_models.get(key)
-        if m is None:
-            out[col] = np.nan
-        else:
-            out[col] = _predict(m, feat, temperature=TEMP_EUPHORIA)
+    # Define "now" flags (event already active)
+    crisis_now = (macro_risk > 0).astype(int)  # DEFCON1/2
+    euphoria_now = (euph_trigger > 0).astype(int)
 
-    # Enforce monotonicity across horizons per-row (cumulative max)
-    def _monotonic_cols(prefix: str, horizons: Dict[str, int]) -> List[str]:
-        keys = [k for k, _ in sorted(horizons.items(), key=lambda kv: kv[1])]
-        return [f"{prefix}{k}" for k in keys]
+    # Median ETA (days) from cycle months
+    # Fear: volatility-peak cycle => crisis risk; allow longer floor (30d)
+    med_fear = _median_days_from_months(months_fear, floor_days=30)
+    # Euphoria: trough; allow shorter floor (7d) so "near trough" shows up quickly
+    med_euph = _median_days_from_months(months_euph, floor_days=7)
 
-    crisis_cols = _monotonic_cols("p_crisis_within_", CRISIS_HORIZONS)
-    euph_cols = _monotonic_cols("p_euphoria_within_", EUPHORIA_HORIZONS)
+    # If months are missing, mark NO_FEATURES
+    status_crisis = np.where(np.isfinite(months_fear), "OK", "NO_FEATURES")
+    status_euphoria = np.where(np.isfinite(months_euph), "OK", "NO_FEATURES")
 
-    out[crisis_cols] = out[crisis_cols].apply(lambda r: pd.Series(np.maximum.accumulate(np.nan_to_num(r.to_numpy(), nan=-np.inf))), axis=1)
-    out[euph_cols] = out[euph_cols].apply(lambda r: pd.Series(np.maximum.accumulate(np.nan_to_num(r.to_numpy(), nan=-np.inf))), axis=1)
+    # Trigger/macro boost
+    med_fear = _apply_trigger_boost(med_fear, fear_trigger, fear_level, macro_risk)
+    med_euph = _apply_trigger_boost(med_euph, euph_trigger, euph_level, 0*macro_risk)
 
-    # Replace -inf back to NaN
-    out[crisis_cols] = out[crisis_cols].replace(-np.inf, np.nan)
-    out[euph_cols] = out[euph_cols].replace(-np.inf, np.nan)
+    # Lognormal params
+    mu_fear = np.log(np.maximum(med_fear, 1.0))
+    mu_euph = np.log(np.maximum(med_euph, 1.0))
 
-    # ETA and mode window per row using the cumulative probabilities
-    eta_crisis_days = []
-    mode_crisis_start = []
-    mode_crisis_end = []
-    eta_eup_days = []
-    mode_eup_start = []
-    mode_eup_end = []
+    # Probabilities within horizons
+    def cdf_at(h: int, mu: np.ndarray, sig: np.ndarray) -> np.ndarray:
+        return _lognormal_cdf(np.full_like(mu, float(h)), mu, sig)
 
-    # Precompute ordered keys
-    crisis_items = sorted(CRISIS_HORIZONS.items(), key=lambda kv: kv[1])
-    euph_items = sorted(EUPHORIA_HORIZONS.items(), key=lambda kv: kv[1])
+    p_crisis = {}
+    for k, h in CRISIS_H.items():
+        p = cdf_at(h, mu_fear, sigma)
+        p = np.where(crisis_now == 1, 1.0, p)
+        p = np.where(status_crisis == "NO_FEATURES", np.nan, p)
+        p_crisis[k] = np.clip(p, 0.0, 1.0)
 
-    for idx, row in out.iterrows():
-        # If already in event, ETA=0 and window=today
-        if int(row.get("crisis_now", 0)) == 1:
-            eta_crisis_days.append(0)
-            mode_crisis_start.append(idx.date().isoformat())
-            mode_crisis_end.append(idx.date().isoformat())
-        else:
-            p_cum = {k: row.get(f"p_crisis_within_{k}") for k, _ in crisis_items}
-            md, ms, me = _derive_eta_and_window(pd.DatetimeIndex([idx]), p_cum, CRISIS_HORIZONS)
-            eta_crisis_days.append(md)
-            mode_crisis_start.append(ms)
-            mode_crisis_end.append(me)
+    p_euph = {}
+    for k, h in EUPH_H.items():
+        p = cdf_at(h, mu_euph, sigma)
+        p = np.where(euphoria_now == 1, 1.0, p)
+        p = np.where(status_euphoria == "NO_FEATURES", np.nan, p)
+        p_euph[k] = np.clip(p, 0.0, 1.0)
 
-        if int(row.get("euphoria_now", 0)) == 1:
-            eta_eup_days.append(0)
-            mode_eup_start.append(idx.date().isoformat())
-            mode_eup_end.append(idx.date().isoformat())
-        else:
-            p_cum = {k: row.get(f"p_euphoria_within_{k}") for k, _ in euph_items}
-            md, ms, me = _derive_eta_and_window(pd.DatetimeIndex([idx]), p_cum, EUPHORIA_HORIZONS)
-            eta_eup_days.append(md)
-            mode_eup_start.append(ms)
-            mode_eup_end.append(me)
+    # Likely window: central 50% interval [q25, q75] in days
+    q25_f = np.exp(mu_fear + sigma * Z25)
+    q75_f = np.exp(mu_fear + sigma * Z75)
+    q25_e = np.exp(mu_euph + sigma * Z25)
+    q75_e = np.exp(mu_euph + sigma * Z75)
 
-    out["eta_crisis_median_days"] = eta_crisis_days
-    out["crisis_mode_start"] = mode_crisis_start
-    out["crisis_mode_end"] = mode_crisis_end
+    # Clamp and round
+    q25_f = np.maximum(0.0, q25_f)
+    q75_f = np.maximum(q25_f, q75_f)
+    q25_e = np.maximum(0.0, q25_e)
+    q75_e = np.maximum(q25_e, q75_e)
 
-    out["eta_euphoria_median_days"] = eta_eup_days
-    out["euphoria_mode_start"] = mode_eup_start
-    out["euphoria_mode_end"] = mode_eup_end
+    eta_f = np.where(status_crisis == "NO_FEATURES", np.nan, med_fear)
+    eta_e = np.where(status_euphoria == "NO_FEATURES", np.nan, med_euph)
 
-    # Derive median ETA dates (if days is present)
-    def _eta_date(base: pd.Timestamp, days: Optional[int]) -> Optional[str]:
-        if days is None or (isinstance(days, float) and np.isnan(days)):
-            return None
-        try:
-            return (base + pd.Timedelta(days=int(days))).date().isoformat()
-        except Exception:
-            return None
+    # Build output
+    out = pd.DataFrame()
+    out["date"] = fe_d["__date"].dt.date.astype(str)
+    out["model"] = "timing_v1_fixed"
+    out["status_crisis"] = status_crisis
+    out["status_euphoria"] = status_euphoria
+    out["crisis_now"] = crisis_now
+    out["euphoria_now"] = euphoria_now
 
-    out["eta_crisis_median_date"] = [
-        _eta_date(idx, d) for idx, d in zip(out.index, out["eta_crisis_median_days"].tolist())
-    ]
-    out["eta_euphoria_median_date"] = [
-        _eta_date(idx, d) for idx, d in zip(out.index, out["eta_euphoria_median_days"].tolist())
-    ]
+    # Attach within probs with the exact column names expected by the frontend
+    out["p_crisis_within_1m"] = p_crisis["1m"]
+    out["p_crisis_within_3m"] = p_crisis["3m"]
+    out["p_crisis_within_6m"] = p_crisis["6m"]
+    out["p_crisis_within_1y"] = p_crisis["1y"]
+    out["p_crisis_within_2y"] = p_crisis["2y"]
+    out["p_crisis_within_3y"] = p_crisis["3y"]
+    out["p_crisis_within_5y"] = p_crisis["5y"]
+    out["p_crisis_within_10y"] = p_crisis["10y"]
 
-    out = out.reset_index(drop=True)
+    out["p_euphoria_within_1w"] = p_euph["1w"]
+    out["p_euphoria_within_1m"] = p_euph["1m"]
+    out["p_euphoria_within_3m"] = p_euph["3m"]
+    out["p_euphoria_within_6m"] = p_euph["6m"]
+    out["p_euphoria_within_1y"] = p_euph["1y"]
+    out["p_euphoria_within_2y"] = p_euph["2y"]
+
+    out["eta_crisis_median_days"] = pd.Series(np.where(np.isfinite(eta_f), np.round(eta_f), np.nan))
+    out["eta_euphoria_median_days"] = pd.Series(np.where(np.isfinite(eta_e), np.round(eta_e), np.nan))
+
+    # Dates for median and windows
+    base = fe_d["__date"].to_numpy(dtype="datetime64[D]")
+    def add_days(arr_days: np.ndarray) -> np.ndarray:
+        # arr_days can contain nan; replace with 0 for calc, then mask back to None
+        mask = np.isfinite(arr_days)
+        days = np.where(mask, arr_days, 0.0).astype(int)
+        dt2 = base + days.astype('timedelta64[D]')
+        # dt2 -> ISO date strings
+        di = pd.to_datetime(dt2)
+        out_str = di.date.astype(str)
+        out_str = np.where(mask, out_str, None)
+        return out_str
+    out["eta_crisis_median_date"] = add_days(eta_f)
+    out["eta_euphoria_median_date"] = add_days(eta_e)
+    out["crisis_mode_start"] = add_days(q25_f)
+    out["crisis_mode_end"] = add_days(q75_f)
+    out["euphoria_mode_start"] = add_days(q25_e)
+    out["euphoria_mode_end"] = add_days(q75_e)
+
     return out
+
+
+def export_timing_v1_daily(
+    *, data_dir: Optional[Path] = None, in_name: str = "fear_euphoria_daily.csv", out_name: str = "timing_v1_daily.csv"
+) -> Optional[Path]:
+    """Read data/fear_euphoria_daily.csv and emit data/timing_v1_daily.csv."""
+    base_dir = Path(__file__).resolve().parent.parent
+    data_dir = data_dir or (base_dir / "data")
+    in_path = data_dir / in_name
+    out_path = data_dir / out_name
+    if not in_path.exists():
+        return None
+    fe = pd.read_csv(in_path)
+    out = build_timing_from_fear_euphoria_daily(fe)
+    if out is None or out.empty:
+        return None
+    out.to_csv(out_path, index=False, encoding="utf-8")
+    return out_path
