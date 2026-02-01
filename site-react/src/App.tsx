@@ -406,6 +406,16 @@ export default function App() {
   }, [data?.forecastV1, dateRange.start, dateRange.end, forecastHorizon]);
 
 
+
+  const fmtPct = (v: any) => {
+    if (typeof v !== "number" || !Number.isFinite(v)) return "—";
+    const pct = v * 100;
+    if (pct === 0) return "0%";
+    if (pct < 1) return "<1%";
+    if (pct > 99) return ">99%";
+    return `${Math.round(pct)}%`;
+  };
+
   const latestTiming = useMemo(() => {
     const rows = data?.timingV1 || [];
     if (!rows || rows.length === 0) return null;
@@ -1349,14 +1359,14 @@ export default function App() {
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {([
-                        ["1m", "p_crisis_1m"],
-                        ["3m", "p_crisis_3m"],
-                        ["6m", "p_crisis_6m"],
-                        ["1y", "p_crisis_1y"],
-                        ["2y", "p_crisis_2y"],
+                        ["1m", "p_crisis_within_1m"],
+                        ["3m", "p_crisis_within_3m"],
+                        ["6m", "p_crisis_within_6m"],
+                        ["1y", "p_crisis_within_1y"],
+                        ["2y", "p_crisis_within_2y"],
                       ] as const).map(([label, key]) => {
                         const v = (latestTiming as any)[key];
-                        const txt = typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "—";
+                        const txt = fmtPct(v);
                         return (
                           <span key={key} className="px-2 py-1 rounded-lg text-xs font-bold bg-red-50 text-red-700 border border-red-100">
                             {t.within} {label}: {txt}
@@ -1378,13 +1388,13 @@ export default function App() {
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {([
-                        ["1w", "p_euphoria_1w"],
-                        ["1m", "p_euphoria_1m"],
-                        ["3m", "p_euphoria_3m"],
-                        ["6m", "p_euphoria_6m"],
+                        ["1w", "p_euphoria_within_1w"],
+                        ["1m", "p_euphoria_within_1m"],
+                        ["3m", "p_euphoria_within_3m"],
+                        ["6m", "p_euphoria_within_6m"],
                       ] as const).map(([label, key]) => {
                         const v = (latestTiming as any)[key];
-                        const txt = typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "—";
+                        const txt = fmtPct(v);
                         return (
                           <span key={key} className="px-2 py-1 rounded-lg text-xs font-bold bg-green-50 text-green-700 border border-green-100">
                             {t.within} {label}: {txt}
