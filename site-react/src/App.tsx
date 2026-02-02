@@ -15,10 +15,10 @@ import {
 } from "recharts";
 import { format, parseISO, subYears, endOfWeek, endOfMonth } from "date-fns";
 import { useWarRoomData } from "@/hooks/useWarRoomData";
-import CycleClock from "@/components/CycleClock";
 import { cn } from "@/lib/utils";
-import { RefreshCw, Search, Filter, Maximize2, X, RotateCcw, Languages } from "lucide-react";
+import { RefreshCw, Search, Filter, Maximize2, X, RotateCcw, Languages, ChevronDown, ChevronUp } from "lucide-react";
 import type { MarketStateRow } from "@/types";
+import BigCycleClock from "@/BigCycleClock";
 
 const STATE_COLORS = {
   WARMUP: "#3498db",
@@ -150,6 +150,7 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState("");
   const [portfolioSearchTerm, setPortfolioSearchTerm] = useState("");
   const [portfolioCopied, setPortfolioCopied] = useState(false);
+  const [showForecastChart, setShowForecastChart] = useState(false);
   
   // Multi-select State
   const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set());
@@ -1342,90 +1343,91 @@ export default function App() {
                 ) : null}
               </div>
 
-              {!latestTiming ? (
-                <div className="text-sm text-slate-500">
-                  No timing data loaded (expected: <span className="font-mono">data/timing_v1_daily.csv</span>)
+              <div className="grid grid-cols-1 lg:grid-cols-[520px,1fr] gap-6">
+                <div className="flex justify-center">
+                  {data?.nasdaq && data.nasdaq.length > 0 ? (
+                    <BigCycleClock nasdaq={data.nasdaq} timing={latestTiming} lang={lang} />
+                  ) : (
+                    <div className="text-sm text-slate-500">
+                      No NASDAQ data loaded (expected: <span className="font-mono">data/nasdaq_dly_ixic_1d.csv</span>)
+                    </div>
+                  )}
                 </div>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="rounded-xl border border-slate-100 p-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="font-bold text-slate-900">{t.crisis}</div>
-                      <div className="text-xs text-slate-500">
-                        {t.eta}: <span className="font-mono text-slate-900">{latestTiming.eta_crisis_median_date || "—"}</span>
-                      </div>
-                    </div>
-                    <div className="text-xs text-slate-500 mb-3">
-                      {t.modeWindow}: <span className="font-mono text-slate-900">{latestTiming.crisis_mode_start && latestTiming.crisis_mode_end ? `${latestTiming.crisis_mode_start} ~ ${latestTiming.crisis_mode_end}` : "—"}</span>
-                    </div>
-                    <div className="flex justify-end mb-2">
-                      <CycleClock
-                        title={t.crisis}
-                        subtitle="cycle"
-                        monthsUntil={(latestTiming as any).months_until_fear}
-                        periodMonths={(latestTiming as any).fear_period_months}
-                        confidence={(latestTiming as any).confidence_fear}
-                        size={96}
-                      />
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {([
-                        ["1m", "p_crisis_within_1m"],
-                        ["3m", "p_crisis_within_3m"],
-                        ["6m", "p_crisis_within_6m"],
-                        ["1y", "p_crisis_within_1y"],
-                        ["2y", "p_crisis_within_2y"],
-                      ] as const).map(([label, key]) => {
-                        const v = (latestTiming as any)[key];
-                        const txt = fmtPct(v);
-                        return (
-                          <span key={key} className="px-2 py-1 rounded-lg text-xs font-bold bg-red-50 text-red-700 border border-red-100">
-                            {t.within} {label}: {txt}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  </div>
 
-                  <div className="rounded-xl border border-slate-100 p-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="font-bold text-slate-900">{t.euphoria}</div>
-                      <div className="text-xs text-slate-500">
-                        {t.eta}: <span className="font-mono text-slate-900">{latestTiming.eta_euphoria_median_date || "—"}</span>
+                <div className="space-y-4">
+                  {!latestTiming ? (
+                    <div className="text-sm text-slate-500">
+                      No timing data loaded (expected: <span className="font-mono">data/timing_v1_daily.csv</span>)
+                    </div>
+                  ) : (
+                    <>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="rounded-xl border border-slate-100 p-4">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="font-bold text-slate-900">{t.crisis}</div>
+                            <div className="text-xs text-slate-500">
+                              {t.eta}: <span className="font-mono text-slate-900">{latestTiming.eta_crisis_median_date || "—"}</span>
+                            </div>
+                          </div>
+                          <div className="text-xs text-slate-500 mb-3">
+                            {t.modeWindow}: <span className="font-mono text-slate-900">{latestTiming.crisis_mode_start && latestTiming.crisis_mode_end ? `${latestTiming.crisis_mode_start} ~ ${latestTiming.crisis_mode_end}` : "—"}</span>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {([
+                              ["1m", "p_crisis_within_1m"],
+                              ["3m", "p_crisis_within_3m"],
+                              ["6m", "p_crisis_within_6m"],
+                              ["1y", "p_crisis_within_1y"],
+                              ["2y", "p_crisis_within_2y"],
+                            ] as const).map(([label, key]) => {
+                              const v = (latestTiming as any)[key];
+                              const txt = fmtPct(v);
+                              return (
+                                <span key={key} className="px-2 py-1 rounded-lg text-xs font-bold bg-red-50 text-red-700 border border-red-100">
+                                  {t.within} {label}: {txt}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        <div className="rounded-xl border border-slate-100 p-4">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="font-bold text-slate-900">{t.euphoria}</div>
+                            <div className="text-xs text-slate-500">
+                              {t.eta}: <span className="font-mono text-slate-900">{latestTiming.eta_euphoria_median_date || "—"}</span>
+                            </div>
+                          </div>
+                          <div className="text-xs text-slate-500 mb-3">
+                            {t.modeWindow}: <span className="font-mono text-slate-900">{latestTiming.euphoria_mode_start && latestTiming.euphoria_mode_end ? `${latestTiming.euphoria_mode_start} ~ ${latestTiming.euphoria_mode_end}` : "—"}</span>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {([
+                              ["1w", "p_euphoria_within_1w"],
+                              ["1m", "p_euphoria_within_1m"],
+                              ["3m", "p_euphoria_within_3m"],
+                              ["6m", "p_euphoria_within_6m"],
+                            ] as const).map(([label, key]) => {
+                              const v = (latestTiming as any)[key];
+                              const txt = fmtPct(v);
+                              return (
+                                <span key={key} className="px-2 py-1 rounded-lg text-xs font-bold bg-green-50 text-green-700 border border-green-100">
+                                  {t.within} {label}: {txt}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                    <div className="text-xs text-slate-500 mb-3">
-                      {t.modeWindow}: <span className="font-mono text-slate-900">{latestTiming.euphoria_mode_start && latestTiming.euphoria_mode_end ? `${latestTiming.euphoria_mode_start} ~ ${latestTiming.euphoria_mode_end}` : "—"}</span>
-                    </div>
-                    <div className="flex justify-end mb-2">
-                      <CycleClock
-                        title={t.euphoria}
-                        subtitle="cycle"
-                        monthsUntil={(latestTiming as any).months_until_euphoria}
-                        periodMonths={(latestTiming as any).euphoria_period_months}
-                        confidence={(latestTiming as any).confidence_euphoria}
-                        size={96}
-                      />
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {([
-                        ["1w", "p_euphoria_within_1w"],
-                        ["1m", "p_euphoria_within_1m"],
-                        ["3m", "p_euphoria_within_3m"],
-                        ["6m", "p_euphoria_within_6m"],
-                      ] as const).map(([label, key]) => {
-                        const v = (latestTiming as any)[key];
-                        const txt = fmtPct(v);
-                        return (
-                          <span key={key} className="px-2 py-1 rounded-lg text-xs font-bold bg-green-50 text-green-700 border border-green-100">
-                            {t.within} {label}: {txt}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  </div>
+
+                      <div className="text-[11px] text-slate-400 leading-relaxed">
+                        * Cycle Clock uses NASDAQ bull/bear phases based on the <span className="font-semibold">±20%</span> rule.
+                        The right-side panels show the current timing model outputs.
+                      </div>
+                    </>
+                  )}
                 </div>
-              )}
+              </div>
             </section>
 
             {/* Forecast v1 (Crisis + Euphoria) */}
@@ -1457,6 +1459,15 @@ export default function App() {
                     <option value="2y">2y</option>
                     <option value="3y">3y</option>
                   </select>
+
+                  <button
+                    onClick={() => setShowForecastChart((v) => !v)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                    aria-label={showForecastChart ? "Hide forecast chart" : "Show forecast chart"}
+                  >
+                    {showForecastChart ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                    <span>{showForecastChart ? (lang === "ko" ? "차트 숨기기" : "Hide") : (lang === "ko" ? "차트 보기" : "Show")}</span>
+                  </button>
                 </div>
               </div>
 
@@ -1465,23 +1476,49 @@ export default function App() {
                   No forecast data loaded (expected: <span className="font-mono">data/forecast_v1_daily.csv</span>)
                 </div>
               ) : (
-                <div className="h-[320px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={forecastChart.data}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                      <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={30} />
-                      <YAxis domain={[0, 1]} tick={{ fontSize: 11 }} />
-                      <Tooltip
-                        formatter={(v: any) => (typeof v === "number" ? `${Math.round(v * 100)}%` : v)}
-                        labelFormatter={(l: any) => `${l}`}
-                        contentStyle={{ borderRadius: "10px" }}
-                      />
-                      <Line type="monotone" dataKey="p_crisis" name={t.crisis} dot={false} stroke="#ef4444" strokeWidth={1.8} isAnimationActive={false} />
-                      <Line type="monotone" dataKey="p_euphoria" name={t.euphoria} dot={false} stroke="#22c55e" strokeWidth={1.8} isAnimationActive={false} />
-                      <Line type="monotone" dataKey="net" name={t.net} dot={false} stroke="#1d4ed8" strokeWidth={1.4} isAnimationActive={false} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
+                <>
+                  {!showForecastChart ? (
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-slate-50 border border-slate-100 rounded-xl p-4">
+                      <div className="text-sm text-slate-600">
+                        {lang === "ko" ? "차트는 숨김 상태입니다. 필요한 경우 ‘차트 보기’를 눌러 확인하세요." : "Chart is hidden. Click ‘Show’ to view."}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {(() => {
+                          const last = data?.forecastV1?.[data.forecastV1.length - 1] as any;
+                          const c = last?.[`p_crisis_${forecastHorizon}`];
+                          const e = last?.[`p_euphoria_${forecastHorizon}`];
+                          const n = last?.[`net_${forecastHorizon}`] ?? (typeof c === "number" && typeof e === "number" ? e - c : null);
+                          const fmt = (v: any) => (typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "—");
+                          return (
+                            <>
+                              <span className="px-2 py-1 rounded-lg text-xs font-bold bg-red-50 text-red-700 border border-red-100">{t.crisis}: {fmt(c)}</span>
+                              <span className="px-2 py-1 rounded-lg text-xs font-bold bg-green-50 text-green-700 border border-green-100">{t.euphoria}: {fmt(e)}</span>
+                              <span className="px-2 py-1 rounded-lg text-xs font-bold bg-blue-50 text-blue-700 border border-blue-100">{t.net}: {fmt(n)}</span>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="h-[320px]">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={forecastChart.data}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                          <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={30} />
+                          <YAxis domain={[0, 1]} tick={{ fontSize: 11 }} />
+                          <Tooltip
+                            formatter={(v: any) => (typeof v === "number" ? `${Math.round(v * 100)}%` : v)}
+                            labelFormatter={(l: any) => `${l}`}
+                            contentStyle={{ borderRadius: "10px" }}
+                          />
+                          <Line type="monotone" dataKey="p_crisis" name={t.crisis} dot={false} stroke="#ef4444" strokeWidth={1.8} isAnimationActive={false} />
+                          <Line type="monotone" dataKey="p_euphoria" name={t.euphoria} dot={false} stroke="#22c55e" strokeWidth={1.8} isAnimationActive={false} />
+                          <Line type="monotone" dataKey="net" name={t.net} dot={false} stroke="#1d4ed8" strokeWidth={1.4} isAnimationActive={false} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  )}
+                </>
               )}
             </section>
 
