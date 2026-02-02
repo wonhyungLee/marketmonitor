@@ -133,17 +133,36 @@ export default function BigCycleClock({
   const labels = useMemo(() => {
     const isKo = lang === "ko";
     return {
-      title: isKo ? "사이클 클락" : "Cycle Clock",
-      fear: isKo ? "공포" : "Crisis",
-      euphoria: isKo ? "환희" : "Euphoria",
+      title: isKo ? "시장 국면 시계" : "Market Phase Clock",
+      bear: isKo ? "하락장(BEAR)" : "Bear market",
+      bull: isKo ? "상승장(BULL)" : "Bull market",
+      crisisModel: isKo ? "위기(리스크오프)" : "Crisis (risk-off)",
+      overheatModel: isKo ? "과열(환희)" : "Euphoria (overheat)",
       now: isKo ? "현재" : "Now",
       started: isKo ? "시작" : "Started",
       elapsed: isKo ? "경과" : "Elapsed",
       days: isKo ? "일" : "d",
-      cycleEta: isKo ? "사이클 기반 예상 전환" : "Cycle-based switch",
-      modelEta: isKo ? "모델 기반 예상 전환" : "Model switch",
-      window: isKo ? "유력 구간" : "Likely window",
+      cycleEta: isKo ? "사이클(±20%) 전환 예상" : "Rule-based switch (±20%)",
+      modelEta: isKo ? "타이밍 모델(위기/과열)" : "Timing model (risk-off/overheat)",
+      windowCycle: isKo ? "전환 유력 구간" : "Switch window",
+      windowModel: isKo ? "유력 구간" : "Likely window",
       recent: isKo ? "직전 구간" : "Recent",
+      termsTitle: isKo ? "용어 안내" : "Terminology",
+      termsLine1: isKo
+        ? "상승장/하락장(BULL/BEAR): NASDAQ 종가의 ±20% 규칙으로 구간을 나눈 결과입니다."
+        : "Bull/Bear: phases from NASDAQ close using the ±20% rule.",
+      termsLine2: isKo
+        ? "위기/과열(환희): 별도 예측 모델 결과로, 상승장/하락장과 1:1로 같지 않을 수 있습니다."
+        : "Crisis/Euphoria: model outputs; they may not match Bull/Bear 1:1.",
+      termsLine3: isKo
+        ? "바늘은 '구간 진행률'(현재 구간 일수 ÷ 전형적 구간 일수)을 뜻하며, 시계 방향 자체는 의미가 없습니다."
+        : "The hand shows phase progress (elapsed days ÷ typical phase days); the direction itself is not meaningful.",
+      ruleDetail: isKo
+        ? "기준: 고점 대비 -20%면 하락장 시작, 저점 대비 +20%면 상승장 시작."
+        : "Rule: Bear starts at -20% from peak; Bull starts at +20% from trough.",
+      ruleNote: isKo
+        ? "점선: 과거 전형적 구간 길이를 기준으로 한 전환 유력 구간(±20%)."
+        : "Dashed arc: cycle-based switch window (±20% of typical phase length).",
     };
   }, [lang]);
 
@@ -229,8 +248,8 @@ export default function BigCycleClock({
   const progArc = describeArc(cx, cy, r, currentIsBear ? 0 : 180, calc.angle);
   const winArc = describeArc(cx, cy, r, calc.winStartAngle, calc.boundaryAngle);
 
-  const currentLabel = currentIsBear ? labels.fear : labels.euphoria;
-  const predictedLabel = currentIsBear ? labels.euphoria : labels.fear;
+  const currentLabel = currentIsBear ? labels.bear : labels.bull;
+  const predictedLabel = currentIsBear ? labels.bull : labels.bear;
 
   const fmtDate = (d: Date | null) => {
     if (!d) return "—";
@@ -274,10 +293,10 @@ export default function BigCycleClock({
 
           {/* labels */}
           <text x={cx} y={42} textAnchor="middle" fontSize="14" fill="#b91c1c" fontWeight="700">
-            {labels.fear}
+            {labels.bear}
           </text>
           <text x={cx} y={size - 24} textAnchor="middle" fontSize="14" fill="#15803d" fontWeight="700">
-            {labels.euphoria}
+            {labels.bull}
           </text>
 
           {/* center text */}
@@ -301,23 +320,38 @@ export default function BigCycleClock({
             <div className="grid grid-cols-1 gap-1 text-xs text-slate-600">
               {calc.prev ? (
                 <div>
-                  {calc.prev.regime === "BEAR" ? labels.fear : labels.euphoria}: {calc.prev.start} → {calc.prev.end} ({calc.prev.days}{labels.days})
+                  {calc.prev.regime === "BEAR" ? labels.bear : labels.bull}: {calc.prev.start} → {calc.prev.end} ({calc.prev.days}{labels.days})
                 </div>
               ) : (
                 <div className="text-slate-400">—</div>
               )}
               <div>
-                {labels.window}: {calc.winStart ? fmtDate(calc.winStart) : "—"} → {calc.winEnd ? fmtDate(calc.winEnd) : "—"}
+                {labels.windowCycle}: {calc.winStart ? fmtDate(calc.winStart) : "—"} → {calc.winEnd ? fmtDate(calc.winEnd) : "—"}
                 <span className="text-slate-400"> (cycle-based)</span>
               </div>
               {model ? (
                 <div className="text-slate-500">
-                  {labels.modelEta}: {currentIsBear ? `${labels.euphoria} → ${model.euphoriaEta || "—"}` : `${labels.fear} → ${model.crisisEta || "—"}`}
-                  {currentIsBear ? (model.euphoriaWin ? ` · ${labels.window}: ${model.euphoriaWin}` : "") : (model.crisisWin ? ` · ${labels.window}: ${model.crisisWin}` : "")}
+                  {labels.modelEta}:
+                  <div className="mt-1 space-y-0.5 pl-2">
+                    <div>
+                      • {labels.crisisModel}: {model.crisisEta || "—"}
+                      {model.crisisWin ? ` · ${labels.windowModel}: ${model.crisisWin}` : ""}
+                    </div>
+                    <div>
+                      • {labels.overheatModel}: {model.euphoriaEta || "—"}
+                      {model.euphoriaWin ? ` · ${labels.windowModel}: ${model.euphoriaWin}` : ""}
+                    </div>
+                  </div>
                 </div>
               ) : null}
-              <div className="text-[11px] text-slate-400 leading-relaxed">
-                * Rule: Bear starts at -20% from peak; Bull starts at +20% from trough. The dashed arc is a cycle-based switch window (±20% of typical phase length).
+
+              <div className="mt-2 text-[11px] text-slate-500 leading-relaxed">
+                <div className="font-semibold text-slate-600 mb-0.5">{labels.termsTitle}</div>
+                <div>• {labels.termsLine1}</div>
+                <div>• {labels.termsLine2}</div>
+                <div>• {labels.termsLine3}</div>
+                <div className="mt-1 text-slate-400">* {labels.ruleDetail}</div>
+                <div className="text-slate-400">* {labels.ruleNote}</div>
               </div>
             </div>
           </div>

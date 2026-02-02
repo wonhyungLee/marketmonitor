@@ -70,17 +70,17 @@ const TRANSLATIONS = {
     nasdaqClose: "NASDAQ Close",
     portfolio: "Portfolio",
     from: "from",
-    forecastTitle: "Forecast (Crisis & Euphoria)",
-    forecastSub: "Probabilities that the market will be in crisis (risk-off) or euphoria (overheat) in H years",
+    forecastTitle: "Forecast (Risk-off & Overheat)",
+    forecastSub: "For each date, the probability that the market will be in risk-off (crisis) or overheat (euphoria) H years later (not the same as Bull/Bear).",
     timingTitle: "Timing (When)",
-    timingSub: "Estimated start window and cumulative probabilities",
+    timingSub: "Timing-model estimate for the start window and cumulative probabilities (may not match Bull/Bear).",
     eta: "ETA (median)",
     modeWindow: "Likely window",
     within: "Within",
     horizon: "Horizon",
-    crisis: "Crisis",
-    euphoria: "Euphoria",
-    net: "Net (Euphoria - Crisis)",
+    crisis: "Risk-off",
+    euphoria: "Overheat",
+    net: "Net (Overheat - Risk-off)",
   },
   ko: {
     headerTitle: "나스닥 + 시장 상태 감지",
@@ -119,17 +119,17 @@ const TRANSLATIONS = {
     nasdaqClose: "나스닥 종가",
     portfolio: "포트폴리오",
     from: "데이터 기준:",
-    forecastTitle: "전망 (위기 & 환희)",
-    forecastSub: "H년 뒤 시장이 위기(리스크오프) 또는 환희(과열) 상태일 확률",
+    forecastTitle: "전망 (위기/과열 확률)",
+    forecastSub: "각 날짜 기준으로 H년 뒤 시장이 위기(리스크오프) 또는 과열(환희) 상태일 확률 (상승장/하락장(BULL/BEAR)과 1:1로 같지 않을 수 있음)",
     timingTitle: "시기 전망 (언제?)",
-    timingSub: "위기/환희 시작 시기(윈도우) 및 누적확률",
+    timingSub: "좌측 시계는 NASDAQ ±20% 규칙의 상승장/하락장(BULL/BEAR), 우측은 위기/과열(환희) 타이밍 모델 결과",
     eta: "예상 시점(중앙값)",
     modeWindow: "유력 구간",
     within: "이내",
     horizon: "기간",
-    crisis: "위기",
-    euphoria: "환희",
-    net: "순확률(환희-위기)",
+    crisis: "위기(리스크오프)",
+    euphoria: "과열(환희)",
+    net: "순확률(과열-위기)",
   },
 };
 
@@ -265,7 +265,7 @@ export default function App() {
   
   // Popup State
   const [showPopup, setShowPopup] = useState(false);
-  const [forecastHorizon, setForecastHorizon] = useState<"1y" | "2y" | "3y">("2y");
+  const [forecastHorizon, setForecastHorizon] = useState<"1y" | "2y" | "3y">("1y");
   const [showDetailPopup, setShowDetailPopup] = useState(false);
   const [dontShowToday, setDontShowToday] = useState(false);
 
@@ -406,6 +406,16 @@ export default function App() {
     });
     return { data: sampled };
   }, [data?.forecastV1, dateRange.start, dateRange.end, forecastHorizon]);
+
+  const forecastDiag = useMemo(() => {
+    const d = forecastChart.data || [];
+    const tail = d.slice(-Math.min(120, d.length));
+    const euphoriaSaturated =
+      tail.length >= 30 &&
+      tail.every((r: any) => typeof r.p_euphoria === "number" && Number.isFinite(r.p_euphoria) && r.p_euphoria >= 0.999);
+    return { euphoriaSaturated };
+  }, [forecastChart.data]);
+
 
 
 
@@ -1421,8 +1431,19 @@ export default function App() {
                       </div>
 
                       <div className="text-[11px] text-slate-400 leading-relaxed">
-                        * Cycle Clock uses NASDAQ bull/bear phases based on the <span className="font-semibold">±20%</span> rule.
-                        The right-side panels show the current timing model outputs.
+                        {lang === "ko" ? (
+                          <>
+                            * 좌측 시계는 NASDAQ 종가의 <span className="font-semibold">±20%</span> 규칙으로 구분한 상승장/하락장(BULL/BEAR)입니다.
+                            <br />
+                            * 우측 패널의 위기/과열(환희) 예측은 별도 모델 결과로, 상승장/하락장과 1:1로 같지 않을 수 있습니다.
+                          </>
+                        ) : (
+                          <>
+                            * The left clock shows NASDAQ Bull/Bear phases using the <span className="font-semibold">±20%</span> rule.
+                            <br />
+                            * The right panels are timing-model outputs (risk-off/overheat) and may not match Bull/Bear 1:1.
+                          </>
+                        )}
                       </div>
                     </>
                   )}
@@ -1471,6 +1492,35 @@ export default function App() {
                 </div>
               </div>
 
+
+
+              <div className="text-[11px] text-slate-500 leading-relaxed mb-3">
+                {lang === "ko" ? (
+                  <>
+                    • 각 날짜의 값은 "그 날짜 기준으로 선택한 기간({forecastHorizon}) 뒤" 시장 상태 확률입니다. ("언제 시작?"가 아니라 "그때 어떤 상태일 확률?")
+                    <br />
+                    • 순확률 = 과열(환희) − 위기(리스크오프) (0보다 크면 과열 우세, 0보다 작으면 위기 우세)
+                    <br />
+                    • 이 전망(위기/과열)은 상승장/하락장(BULL/BEAR) 구분과 다른 모델이라 서로 1:1로 일치하지 않을 수 있습니다.
+                  </>
+                ) : (
+                  <>
+                    • Each point is the probability of the market state "{forecastHorizon} later from that date" (not "when it starts", but "what state it will be in").
+                    <br />
+                    • Net = Overheat − Risk-off (positive: overheat dominates, negative: risk-off dominates)
+                    <br />
+                    • These model probabilities (risk-off/overheat) may not match Bull/Bear phases 1:1.
+                  </>
+                )}
+
+                {forecastDiag.euphoriaSaturated ? (
+                  <div className="mt-2 inline-block rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800">
+                    {lang === "ko"
+                      ? "주의: 과열(환희) 확률이 장기간 100%에 가깝게 포화되어 보입니다. 데이터/모델(p_euphoria)을 점검하세요."
+                      : "Warning: Overheat probability looks saturated near 100% for an extended period. Check data/model (p_euphoria)."}
+                  </div>
+                ) : null}
+              </div>
               {(!data?.forecastV1 || data.forecastV1.length === 0) ? (
                 <div className="text-sm text-slate-500">
                   No forecast data loaded (expected: <span className="font-mono">data/forecast_v1_daily.csv</span>)
