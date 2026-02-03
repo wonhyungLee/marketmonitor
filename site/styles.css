@@ -22,6 +22,10 @@
   box-sizing: border-box;
 }
 
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
 html,
 body {
   height: 100%;
@@ -519,3 +523,132 @@ h2 {
 .cal-cell .tag.none { background: rgba(21, 19, 18, 0.08); color: rgba(21, 19, 18, 0.7); }
 .cal-cell.both { box-shadow: inset 0 0 0 2px rgba(155, 89, 182, 0.35); }
 .small { font-size: 12px; }
+
+/* Mobile usability tweaks */
+@media (max-width: 680px) {
+  .wrap {
+    width: min(1200px, calc(100% - 24px));
+    margin: 14px auto 40px;
+    gap: 14px;
+  }
+
+  .hero {
+    padding: 14px 14px 4px;
+  }
+
+  .card-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .controls {
+    justify-content: flex-start;
+  }
+
+  .checks {
+    max-width: none;
+    justify-content: flex-start;
+  }
+
+  .range {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .range input[type="date"] {
+    min-width: 44vw;
+  }
+
+  .chart {
+    height: 320px;
+  }
+
+  .chart-sm {
+    height: 220px;
+  }
+
+  .table-tools {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .search {
+    min-width: 0;
+    width: 100%;
+  }
+
+  /* Avoid nested scroll areas on mobile */
+  .table-wrap {
+    max-height: none;
+    overflow: visible;
+  }
+
+  /* Table -> card layout */
+  .table thead {
+    display: none;
+  }
+
+  .table,
+  .table tbody,
+  .table tr,
+  .table td {
+    display: block;
+    width: 100%;
+  }
+
+  .table tbody tr {
+    margin: 10px 12px;
+    border: 1px solid rgba(21, 19, 18, 0.12);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.78);
+    overflow: hidden;
+    box-shadow: 0 10px 24px rgba(21, 19, 18, 0.08);
+  }
+
+  .table tbody td {
+    padding: 9px 12px;
+    border-bottom: 1px solid rgba(21, 19, 18, 0.06);
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .table tbody td:last-child {
+    border-bottom: 0;
+  }
+
+  .table tbody td::before {
+    content: attr(data-label);
+    font-size: 11px;
+    font-weight: 700;
+    color: rgba(21, 19, 18, 0.6);
+    letter-spacing: 0.02em;
+  }
+
+  .table tbody td.num {
+    text-align: left;
+  }
+
+  .table tbody tr.selected td {
+    background: rgba(11, 114, 133, 0.1);
+    box-shadow: none;
+  }
+
+  .pager {
+    flex-wrap: wrap;
+  }
+
+  /* Fear/Euphoria calendar */
+  .calendar-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 420px) {
+  .calendar-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

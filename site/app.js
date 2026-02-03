@@ -433,52 +433,63 @@ function renderTable(state, filteredRows) {
     });
 
     const tdDate = document.createElement("td");
+    tdDate.dataset.label = "Date";
     tdDate.textContent = r.date;
     tr.appendChild(tdDate);
 
     const tdState = document.createElement("td");
+    tdState.dataset.label = "State";
     tdState.appendChild(makeStatePill(r.state));
     tr.appendChild(tdState);
 
     const tdScore = document.createElement("td");
+    tdScore.dataset.label = "Score";
     tdScore.className = "num";
     tdScore.textContent = r.score === null ? "—" : fmtNum(r.score, 3);
     tr.appendChild(tdScore);
 
     const tdTrend = document.createElement("td");
+    tdTrend.dataset.label = "Trend";
     tdTrend.textContent = r.trend ? String(r.trend) : "—";
     tr.appendChild(tdTrend);
 
     const tdEquity = document.createElement("td");
+    tdEquity.dataset.label = "Equity %";
     tdEquity.className = "num";
     tdEquity.textContent = r.equity === null ? "—" : `${fmtNum(r.equity * 100.0, 1)}%`;
     tr.appendChild(tdEquity);
 
     const tdAction = document.createElement("td");
+    tdAction.dataset.label = "Action";
     tdAction.textContent = r.action ? String(r.action) : "—";
     tr.appendChild(tdAction);
 
     const tdGross = document.createElement("td");
+    tdGross.dataset.label = "Gross";
     tdGross.className = "num";
     tdGross.textContent = r.gross === null ? "—" : `${fmtNum(r.gross, 2)}x`;
     tr.appendChild(tdGross);
 
     const tdCash = document.createElement("td");
+    tdCash.dataset.label = "Cash %";
     tdCash.className = "num";
     tdCash.textContent = r.cash === null ? "—" : `${fmtNum(r.cash * 100.0, 1)}%`;
     tr.appendChild(tdCash);
 
     const tdPort = document.createElement("td");
+    tdPort.dataset.label = "Portfolio (Top)";
     tdPort.textContent = r.portfolioTop ? String(r.portfolioTop) : "—";
     if (r.portfolioTitle) tdPort.title = r.portfolioTitle;
     tr.appendChild(tdPort);
 
     const tdClose = document.createElement("td");
+    tdClose.dataset.label = "NASDAQ Close";
     tdClose.className = "num";
     tdClose.textContent = r.close === null ? "—" : fmtNum(r.close, 2);
     tr.appendChild(tdClose);
 
     const tdTrig = document.createElement("td");
+    tdTrig.dataset.label = "Triggers";
     tdTrig.textContent = r.triggers || "";
     if (r.triggers) tdTrig.title = r.triggers;
     tr.appendChild(tdTrig);
