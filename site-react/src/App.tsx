@@ -73,9 +73,15 @@ const TRANSLATIONS = {
     forecastTitle: "Forecast (Risk-off & Overheat)",
     forecastSub: "For each date, the probability that the market will be in risk-off (crisis) or overheat (euphoria) H years later (not the same as Bull/Bear).",
     timingTitle: "Timing (When)",
-    timingSub: "Timing-model estimate for the start window and cumulative probabilities (may not match Bull/Bear).",
+    timingSub: "ETA/window & cumulative probabilities (not a guaranteed date; may not match Bull/Bear).",
+    termsButton: "Terms",
+    narrativeTitle: "Narrative",
+    showNumbers: "Show numbers",
+    hideNumbers: "Hide numbers",
+    asOf: "As of",
     eta: "ETA (median)",
     modeWindow: "Likely window",
+    withinProbTitle: "Within (cumulative)",
     within: "Within",
     horizon: "Horizon",
     crisis: "Risk-off",
@@ -122,9 +128,15 @@ const TRANSLATIONS = {
     forecastTitle: "전망 (위기/과열 확률)",
     forecastSub: "각 날짜 기준으로 H년 뒤 시장이 위기(리스크오프) 또는 과열(환희) 상태일 확률 (상승장/하락장(BULL/BEAR)과 1:1로 같지 않을 수 있음)",
     timingTitle: "시기 전망 (언제?)",
-    timingSub: "좌측 시계는 NASDAQ ±20% 규칙의 상승장/하락장(BULL/BEAR), 우측은 위기/과열(환희) 타이밍 모델 결과",
-    eta: "예상 시점(중앙값)",
+    timingSub: "좌: NASDAQ ±20% 규칙의 BULL/BEAR · 우: 위기/과열 타이밍 모델(ETA/유력구간, 확정일 아님)",
+    termsButton: "용어",
+    narrativeTitle: "문장 해설",
+    showNumbers: "수치 보기",
+    hideNumbers: "수치 숨기기",
+    asOf: "데이터 기준일",
+    eta: "ETA(중앙값)",
     modeWindow: "유력 구간",
+    withinProbTitle: "Within(기간 내) 누적확률",
     within: "이내",
     horizon: "기간",
     crisis: "위기(리스크오프)",
@@ -267,6 +279,7 @@ export default function App() {
   const [showPopup, setShowPopup] = useState(false);
   const [forecastHorizon, setForecastHorizon] = useState<"1y" | "2y" | "3y">("1y");
   const [showDetailPopup, setShowDetailPopup] = useState(false);
+  const [showTimingNumbers, setShowTimingNumbers] = useState(false);
   const [dontShowToday, setDontShowToday] = useState(false);
 
   useEffect(() => {
@@ -433,6 +446,80 @@ export default function App() {
     if (!rows || rows.length === 0) return null;
     return rows[rows.length - 1];
   }, [data?.timingV1]);
+
+  const probLevel = (v: any) => {
+    if (typeof v !== "number" || !Number.isFinite(v)) return lang === "ko" ? "알 수 없음" : "unknown";
+    if (v < 0.1) return lang === "ko" ? "매우 낮음" : "very low";
+    if (v < 0.25) return lang === "ko" ? "낮음" : "low";
+    if (v < 0.5) return lang === "ko" ? "보통" : "medium";
+    if (v < 0.75) return lang === "ko" ? "높음" : "high";
+    return lang === "ko" ? "매우 높음" : "very high";
+  };
+
+  const timingNarrative = useMemo(() => {
+    if (!latestTiming) return null;
+    const win = (start?: string | null, end?: string | null) => (start && end ? `${start} ~ ${end}` : null);
+
+    const crisisWin = win(latestTiming.crisis_mode_start, latestTiming.crisis_mode_end);
+    const euphoriaWin = win(latestTiming.euphoria_mode_start, latestTiming.euphoria_mode_end);
+
+    const c1m = probLevel((latestTiming as any).p_crisis_within_1m);
+    const c3m = probLevel((latestTiming as any).p_crisis_within_3m);
+    const c6m = probLevel((latestTiming as any).p_crisis_within_6m);
+
+    const e1w = probLevel((latestTiming as any).p_euphoria_within_1w);
+    const e1m = probLevel((latestTiming as any).p_euphoria_within_1m);
+    const e3m = probLevel((latestTiming as any).p_euphoria_within_3m);
+
+    if (lang === "ko") {
+      const lines: string[] = [];
+      lines.push(`기준일 ${latestTiming.date} 기준으로, 아래 내용은 ‘확정일’이 아니라 확률 기반 참고입니다.`);
+      lines.push(
+        `위기(리스크오프)는 ${crisisWin ? `${crisisWin} 구간이 상대적으로 유력합니다` : "유력 구간 정보가 부족합니다"}. 단기(1개월) 가능성은 ${c1m}, 중기(3~6개월) 가능성은 ${c3m}/${c6m} 수준입니다.`
+      );
+      lines.push(
+        `과열(환희)는 ${euphoriaWin ? `${euphoriaWin} 구간이 상대적으로 유력합니다` : "유력 구간 정보가 부족합니다"}. 단기(1주~1개월) 가능성은 ${e1w}/${e1m}, 중기(3개월) 가능성은 ${e3m} 수준입니다.`
+      );
+      lines.push("참고: 위기/과열(환희)은 상승장/하락장(BULL/BEAR)과 1:1로 일치하지 않을 수 있습니다.");
+      return { lines };
+    }
+
+    const lines: string[] = [];
+    lines.push(`As of ${latestTiming.date}: the sentences below are probability-based references, not guaranteed event days.`);
+    lines.push(
+      `Risk-off is ${crisisWin ? `more likely around the window ${crisisWin}` : "missing a reliable window"}. Short-term (1m) likelihood is ${c1m}, mid-term (3–6m) is ${c3m}/${c6m}.`
+    );
+    lines.push(
+      `Overheat is ${euphoriaWin ? `more likely around the window ${euphoriaWin}` : "missing a reliable window"}. Short-term (1w–1m) likelihood is ${e1w}/${e1m}, mid-term (3m) is ${e3m}.`
+    );
+    lines.push("Note: Risk-off/Overheat are not a 1:1 match with Bull/Bear (±20% rule).");
+    return { lines };
+  }, [lang, latestTiming]);
+
+  const termEntries = useMemo(() => {
+    if (lang === "ko") {
+      return [
+        { title: "데이터 기준일", text: "표시된 해설/확률/구간이 계산된 기준 날짜입니다. 미래 ‘확정 날짜’가 아닙니다." },
+        { title: "상승장/하락장(BULL/BEAR)", text: "NASDAQ 종가의 ±20% 규칙으로만 구분한 가격 기반 구간입니다." },
+        { title: "위기(리스크오프) / 과열(환희)", text: "별도 타이밍 모델의 모드이며, BULL/BEAR와 1:1로 일치하지 않을 수 있습니다." },
+        { title: "ETA(중앙값)", text: "모드 ‘진입 시점’ 확률분포의 중앙값(50%) 참고치입니다. 그날 확정 진입을 뜻하지 않습니다." },
+        { title: "유력 구간", text: "모드가 시작될 가능성이 상대적으로 높은 날짜 ‘범위’입니다. 단일 날짜로 해석하지 않습니다." },
+        { title: "Within(기간 내) 누적확률", text: "기준일로부터 해당 기간 안에 모드에 ‘진입’할 누적 확률입니다(특정 하루의 확률이 아님)." },
+        { title: "전망 기간(H)", text: "각 날짜 기준으로 ‘H 뒤 시점’의 상태 확률을 의미합니다. H년 동안 지속된다는 뜻이 아닙니다." },
+        { title: "순확률(과열-위기)", text: "과열 확률에서 위기 확률을 뺀 방향성 요약입니다. 확정 판단이 아닙니다." },
+      ] as Array<{ title: string; text: string }>;
+    }
+    return [
+      { title: "As-of date", text: "The reference date used to compute narratives/probabilities/windows. Not a guaranteed future event day." },
+      { title: "Bull/Bear (±20% rule)", text: "A price-based regime derived from NASDAQ closes using the ±20% rule." },
+      { title: "Risk-off / Overheat", text: "Timing-model modes; they may not match Bull/Bear 1:1." },
+      { title: "ETA (median)", text: "The median (50th percentile) of the model’s estimated entry-time distribution. Not a guaranteed entry day." },
+      { title: "Likely window", text: "A date range where the mode is relatively more likely to start. Interpret as an interval, not a single date." },
+      { title: "Within (cumulative)", text: "Cumulative probability of entering within the given horizon from the as-of date (not a single-day probability)." },
+      { title: "Forecast horizon (H)", text: "Probability of the market state at H later from each date, not ‘guaranteed until year X’." },
+      { title: "Net (Overheat − Risk-off)", text: "Directional summary (difference), not a guarantee." },
+    ] as Array<{ title: string; text: string }>;
+  }, [lang]);
 
 
   // Filter Data
@@ -1337,20 +1424,27 @@ export default function App() {
                   <h2 className="text-lg font-bold text-slate-900">{t.timingTitle}</h2>
                   <p className="text-xs text-slate-500">{t.timingSub}</p>
                 </div>
-                {latestTiming ? (
-                  <div className="flex items-center gap-2">
-                    {latestTiming.status_crisis && latestTiming.status_crisis !== "OK" && (
-                      <span className="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700 border border-amber-200">
-                        {latestTiming.status_crisis}
-                      </span>
-                    )}
-                    {latestTiming.status_euphoria && latestTiming.status_euphoria !== "OK" && (
-                      <span className="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700 border border-amber-200">
-                        {latestTiming.status_euphoria}
-                      </span>
-                    )}
-                  </div>
-                ) : null}
+                <div className="flex items-center gap-2">
+                  {latestTiming ? (
+                    <>
+                      <div className="hidden md:block text-xs text-slate-500">
+                        {t.asOf}: <span className="font-mono text-slate-900">{latestTiming.date}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {latestTiming.status_crisis && latestTiming.status_crisis !== "OK" && (
+                          <span className="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700 border border-amber-200">
+                            {latestTiming.status_crisis}
+                          </span>
+                        )}
+                        {latestTiming.status_euphoria && latestTiming.status_euphoria !== "OK" && (
+                          <span className="px-2 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700 border border-amber-200">
+                            {latestTiming.status_euphoria}
+                          </span>
+                        )}
+                      </div>
+                    </>
+                  ) : null}
+                </div>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-[520px,1fr] gap-6">
@@ -1371,6 +1465,39 @@ export default function App() {
                     </div>
                   ) : (
                     <>
+                      {timingNarrative ? (
+                        <div className="rounded-xl border border-slate-100 bg-slate-50 p-4">
+                          <div className="flex items-center justify-between gap-3 mb-2">
+                            <div className="text-xs font-bold text-slate-700">{t.narrativeTitle}</div>
+                            <button
+                              type="button"
+                              onClick={() => setShowTimingNumbers((v) => !v)}
+                              className="px-2 py-1 rounded-lg text-xs font-bold border border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
+                            >
+                              {showTimingNumbers ? t.hideNumbers : t.showNumbers}
+                            </button>
+                          </div>
+                          <div className="space-y-2 text-sm text-slate-700 leading-relaxed">
+                            {timingNarrative.lines.map((line) => (
+                              <p key={line}>{line}</p>
+                            ))}
+                          </div>
+
+                          <details className="mt-4 rounded-xl border border-slate-200 bg-white p-3">
+                            <summary className="cursor-pointer select-none text-xs font-bold text-slate-700">{t.termsButton}</summary>
+                            <div className="mt-3 space-y-3 text-xs text-slate-600 leading-relaxed">
+                              {termEntries.map((e) => (
+                                <div key={e.title}>
+                                  <div className="font-semibold text-slate-800">{e.title}</div>
+                                  <div className="mt-0.5">{e.text}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </details>
+                        </div>
+                      ) : null}
+
+                      {showTimingNumbers ? (
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div className="rounded-xl border border-slate-100 p-4">
                           <div className="flex items-center justify-between mb-2">
@@ -1380,8 +1507,12 @@ export default function App() {
                             </div>
                           </div>
                           <div className="text-xs text-slate-500 mb-3">
-                            {t.modeWindow}: <span className="font-mono text-slate-900">{latestTiming.crisis_mode_start && latestTiming.crisis_mode_end ? `${latestTiming.crisis_mode_start} ~ ${latestTiming.crisis_mode_end}` : "—"}</span>
+                            {t.modeWindow}:{" "}
+                            <span className="font-mono text-slate-900">
+                              {latestTiming.crisis_mode_start && latestTiming.crisis_mode_end ? `${latestTiming.crisis_mode_start} ~ ${latestTiming.crisis_mode_end}` : "—"}
+                            </span>
                           </div>
+                          <div className="text-[11px] text-slate-500 mb-2">{t.withinProbTitle}</div>
                           <div className="flex flex-wrap gap-2">
                             {([
                               ["1m", "p_crisis_within_1m"],
@@ -1394,7 +1525,7 @@ export default function App() {
                               const txt = fmtPct(v);
                               return (
                                 <span key={key} className="px-2 py-1 rounded-lg text-xs font-bold bg-red-50 text-red-700 border border-red-100">
-                                  {t.within} {label}: {txt}
+                                  {label}: {txt}
                                 </span>
                               );
                             })}
@@ -1409,8 +1540,12 @@ export default function App() {
                             </div>
                           </div>
                           <div className="text-xs text-slate-500 mb-3">
-                            {t.modeWindow}: <span className="font-mono text-slate-900">{latestTiming.euphoria_mode_start && latestTiming.euphoria_mode_end ? `${latestTiming.euphoria_mode_start} ~ ${latestTiming.euphoria_mode_end}` : "—"}</span>
+                            {t.modeWindow}:{" "}
+                            <span className="font-mono text-slate-900">
+                              {latestTiming.euphoria_mode_start && latestTiming.euphoria_mode_end ? `${latestTiming.euphoria_mode_start} ~ ${latestTiming.euphoria_mode_end}` : "—"}
+                            </span>
                           </div>
+                          <div className="text-[11px] text-slate-500 mb-2">{t.withinProbTitle}</div>
                           <div className="flex flex-wrap gap-2">
                             {([
                               ["1w", "p_euphoria_within_1w"],
@@ -1422,29 +1557,14 @@ export default function App() {
                               const txt = fmtPct(v);
                               return (
                                 <span key={key} className="px-2 py-1 rounded-lg text-xs font-bold bg-green-50 text-green-700 border border-green-100">
-                                  {t.within} {label}: {txt}
+                                  {label}: {txt}
                                 </span>
                               );
                             })}
                           </div>
                         </div>
                       </div>
-
-                      <div className="text-[11px] text-slate-400 leading-relaxed">
-                        {lang === "ko" ? (
-                          <>
-                            * 좌측 시계는 NASDAQ 종가의 <span className="font-semibold">±20%</span> 규칙으로 구분한 상승장/하락장(BULL/BEAR)입니다.
-                            <br />
-                            * 우측 패널의 위기/과열(환희) 예측은 별도 모델 결과로, 상승장/하락장과 1:1로 같지 않을 수 있습니다.
-                          </>
-                        ) : (
-                          <>
-                            * The left clock shows NASDAQ Bull/Bear phases using the <span className="font-semibold">±20%</span> rule.
-                            <br />
-                            * The right panels are timing-model outputs (risk-off/overheat) and may not match Bull/Bear 1:1.
-                          </>
-                        )}
-                      </div>
+                      ) : null}
                     </>
                   )}
                 </div>
@@ -1497,19 +1617,19 @@ export default function App() {
               <div className="text-[11px] text-slate-500 leading-relaxed mb-3">
                 {lang === "ko" ? (
                   <>
-                    • 각 날짜의 값은 "그 날짜 기준으로 선택한 기간({forecastHorizon}) 뒤" 시장 상태 확률입니다. ("언제 시작?"가 아니라 "그때 어떤 상태일 확률?")
+                    전망은 각 날짜 기준으로 “{forecastHorizon} 뒤 시점”의 상태 확률을 뜻합니다. 기간 동안의 ‘확정 상태’가 아닙니다.
                     <br />
-                    • 순확률 = 과열(환희) − 위기(리스크오프) (0보다 크면 과열 우세, 0보다 작으면 위기 우세)
+                    순확률(과열−위기)은 방향성 요약이며, 확정 판단이 아닙니다.
                     <br />
-                    • 이 전망(위기/과열)은 상승장/하락장(BULL/BEAR) 구분과 다른 모델이라 서로 1:1로 일치하지 않을 수 있습니다.
+                    위기/과열 전망은 BULL/BEAR 구분과 1:1로 일치하지 않을 수 있습니다.
                   </>
                 ) : (
                   <>
-                    • Each point is the probability of the market state "{forecastHorizon} later from that date" (not "when it starts", but "what state it will be in").
+                    This forecast describes the market state “{forecastHorizon} later from each date”. It is not “guaranteed until year X”.
                     <br />
-                    • Net = Overheat − Risk-off (positive: overheat dominates, negative: risk-off dominates)
+                    Net (Overheat − Risk-off) is a directional summary, not a guarantee.
                     <br />
-                    • These model probabilities (risk-off/overheat) may not match Bull/Bear phases 1:1.
+                    Risk-off/Overheat may not match Bull/Bear phases 1:1.
                   </>
                 )}
 
@@ -1529,25 +1649,47 @@ export default function App() {
                 <>
                   {!showForecastChart ? (
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-slate-50 border border-slate-100 rounded-xl p-4">
-                      <div className="text-sm text-slate-600">
-                        {lang === "ko" ? "차트는 숨김 상태입니다. 필요한 경우 ‘차트 보기’를 눌러 확인하세요." : "Chart is hidden. Click ‘Show’ to view."}
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        {(() => {
-                          const last = data?.forecastV1?.[data.forecastV1.length - 1] as any;
-                          const c = last?.[`p_crisis_${forecastHorizon}`];
-                          const e = last?.[`p_euphoria_${forecastHorizon}`];
-                          const n = last?.[`net_${forecastHorizon}`] ?? (typeof c === "number" && typeof e === "number" ? e - c : null);
-                          const fmt = (v: any) => (typeof v === "number" && Number.isFinite(v) ? `${Math.round(v * 100)}%` : "—");
-                          return (
-                            <>
-                              <span className="px-2 py-1 rounded-lg text-xs font-bold bg-red-50 text-red-700 border border-red-100">{t.crisis}: {fmt(c)}</span>
-                              <span className="px-2 py-1 rounded-lg text-xs font-bold bg-green-50 text-green-700 border border-green-100">{t.euphoria}: {fmt(e)}</span>
-                              <span className="px-2 py-1 rounded-lg text-xs font-bold bg-blue-50 text-blue-700 border border-blue-100">{t.net}: {fmt(n)}</span>
-                            </>
-                          );
-                        })()}
-                      </div>
+                      {(() => {
+                        const last = data?.forecastV1?.[data.forecastV1.length - 1] as any;
+                        if (!last) return <div className="text-sm text-slate-600">—</div>;
+                        const c = last?.[`p_crisis_${forecastHorizon}`];
+                        const e = last?.[`p_euphoria_${forecastHorizon}`];
+                        const n = last?.[`net_${forecastHorizon}`] ?? (typeof c === "number" && typeof e === "number" ? e - c : null);
+
+                        const label = (() => {
+                          if (typeof n !== "number" || !Number.isFinite(n)) return lang === "ko" ? "해석 불가" : "Unknown";
+                          if (n >= 0.15) return lang === "ko" ? "과열 우세(강)" : "Strong overheat bias";
+                          if (n >= 0.05) return lang === "ko" ? "과열 우세" : "Overheat bias";
+                          if (n <= -0.15) return lang === "ko" ? "위기 우세(강)" : "Strong risk-off bias";
+                          if (n <= -0.05) return lang === "ko" ? "위기 우세" : "Risk-off bias";
+                          return lang === "ko" ? "중립/혼조" : "Mixed/neutral";
+                        })();
+
+                        const pillClass = (() => {
+                          if (typeof n !== "number" || !Number.isFinite(n)) return "bg-slate-100 text-slate-700 border-slate-200";
+                          if (n >= 0.05) return "bg-green-50 text-green-700 border-green-100";
+                          if (n <= -0.05) return "bg-red-50 text-red-700 border-red-100";
+                          return "bg-blue-50 text-blue-700 border-blue-100";
+                        })();
+
+                        return (
+                          <div className="w-full space-y-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-sm text-slate-600">
+                                {lang === "ko"
+                                  ? `최근 데이터 기준으로, ${forecastHorizon} 뒤 시점은 “${label}”로 해석됩니다(확정 아님).`
+                                  : `As of the latest row, the ${forecastHorizon}-ahead state reads as “${label}” (not a guarantee).`}
+                              </div>
+                              <span className={cn("px-2 py-1 rounded-lg text-xs font-bold border", pillClass)}>{label}</span>
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {lang === "ko"
+                                ? "차트는 숨김 상태입니다. 필요하면 ‘차트 보기’를 눌러 확인하세요."
+                                : "Chart is hidden. Click ‘Show’ to view."}
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   ) : (
                     <div className="h-[320px]">

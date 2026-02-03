@@ -105,22 +105,6 @@ function buildBullBearSegments(nasdaq: NasdaqPoint[]): { segments: Segment[]; cu
   return { segments: segs, current, prev };
 }
 
-function polarToCartesian(cx: number, cy: number, r: number, angleDeg: number) {
-  const rad = ((angleDeg - 90) * Math.PI) / 180;
-  return {
-    x: cx + r * Math.cos(rad),
-    y: cy + r * Math.sin(rad),
-  };
-}
-
-function describeArc(cx: number, cy: number, r: number, startAngle: number, endAngle: number) {
-  const start = polarToCartesian(cx, cy, r, endAngle);
-  const end = polarToCartesian(cx, cy, r, startAngle);
-  const sweep = endAngle - startAngle;
-  const largeArcFlag = sweep <= 180 ? "0" : "1";
-  return `M ${start.x} ${start.y} A ${r} ${r} 0 ${largeArcFlag} 1 ${end.x} ${end.y}`;
-}
-
 export default function BigCycleClock({
   nasdaq,
   timing,
@@ -133,30 +117,35 @@ export default function BigCycleClock({
   const labels = useMemo(() => {
     const isKo = lang === "ko";
     return {
-      title: isKo ? "시장 국면 시계" : "Market Phase Clock",
+      title: isKo ? "시장 국면 게이지" : "Market Phase Gauge",
       bear: isKo ? "하락장(BEAR)" : "Bear market",
       bull: isKo ? "상승장(BULL)" : "Bull market",
       crisisModel: isKo ? "위기(리스크오프)" : "Crisis (risk-off)",
       overheatModel: isKo ? "과열(환희)" : "Euphoria (overheat)",
       now: isKo ? "현재" : "Now",
+      asOf: isKo ? "데이터 기준일" : "As of",
       started: isKo ? "시작" : "Started",
       elapsed: isKo ? "경과" : "Elapsed",
       days: isKo ? "일" : "d",
-      cycleEta: isKo ? "사이클(±20%) 전환 예상" : "Rule-based switch (±20%)",
-      modelEta: isKo ? "타이밍 모델(위기/과열)" : "Timing model (risk-off/overheat)",
+      cycleEta: isKo ? "다음 전환 참고일(확정 아님)" : "Reference switch date (not guaranteed)",
       windowCycle: isKo ? "전환 유력 구간" : "Switch window",
       windowModel: isKo ? "유력 구간" : "Likely window",
+      windowCycleNote: isKo ? "전형적 길이±20% 참고" : "±20% of typical length",
+      summary: isKo ? "요약" : "Summary",
       recent: isKo ? "직전 구간" : "Recent",
-      termsTitle: isKo ? "용어 안내" : "Terminology",
-      termsLine1: isKo
-        ? "상승장/하락장(BULL/BEAR): NASDAQ 종가의 ±20% 규칙으로 구간을 나눈 결과입니다."
-        : "Bull/Bear: phases from NASDAQ close using the ±20% rule.",
-      termsLine2: isKo
-        ? "위기/과열(환희): 별도 예측 모델 결과로, 상승장/하락장과 1:1로 같지 않을 수 있습니다."
-        : "Crisis/Euphoria: model outputs; they may not match Bull/Bear 1:1.",
-      termsLine3: isKo
-        ? "바늘은 '구간 진행률'(현재 구간 일수 ÷ 전형적 구간 일수)을 뜻하며, 시계 방향 자체는 의미가 없습니다."
-        : "The hand shows phase progress (elapsed days ÷ typical phase days); the direction itself is not meaningful.",
+      note: isKo ? "※ 날짜는 확정이 아니라 참고/확률 정보입니다." : "Note: dates are references/probabilities, not guarantees.",
+      gaugeProgress: isKo ? "진행" : "Progress",
+      stageEarly: isKo ? "초반" : "Early",
+      stageMid: isKo ? "중반" : "Mid",
+      stageLate: isKo ? "후반" : "Late",
+      windowBefore: isKo ? "전환 유력 구간 이전" : "Before likely window",
+      windowInside: isKo ? "전환 유력 구간 안" : "Inside likely window",
+      gaugeStart: isKo ? "시작" : "Start",
+      gaugeLikely: isKo ? "유력" : "Likely",
+      gaugeRef: isKo ? "참고 전환" : "Ref",
+      gaugeHint: isKo
+        ? "게이지는 현재 구간이 ‘전형적 길이’ 대비 어느 정도 진행됐는지를 보여줍니다. (확정 예측 아님)"
+        : "The gauge shows phase progress vs a ‘typical’ duration. (Not a guarantee)",
       ruleDetail: isKo
         ? "기준: 고점 대비 -20%면 하락장 시작, 저점 대비 +20%면 상승장 시작."
         : "Rule: Bear starts at -20% from peak; Bull starts at +20% from trough.",
@@ -179,7 +168,6 @@ export default function BigCycleClock({
 
     const avgDays = current.regime === "BULL" ? medBull : medBear;
     const progress = clamp01(avgDays > 0 ? current.days / avgDays : 0);
-    const angle = current.regime === "BEAR" ? 0 + progress * 180 : 180 + progress * 180;
 
     const phaseStart = current.start;
     const predictedSwitch = addDays(parseISO(phaseStart), Math.round(avgDays));
@@ -188,13 +176,8 @@ export default function BigCycleClock({
     const winStart = predictedSwitchDate ? addDays(predictedSwitchDate, -winHalf) : null;
     const winEnd = predictedSwitchDate ? addDays(predictedSwitchDate, winHalf) : null;
 
-    const phaseName = current.regime === "BEAR" ? "fear" : "euphoria";
     const prevText = prev ? prev : null;
-
-    // Window arc in angle-space (last 20% of the current half)
-    const winStartProgress = clamp01(1 - 0.2);
-    const winStartAngle = current.regime === "BEAR" ? winStartProgress * 180 : 180 + winStartProgress * 180;
-    const boundaryAngle = current.regime === "BEAR" ? 180 : 360;
+    const winStartProgress = clamp01(1 - 0.2); // last 20% of typical duration
 
     return {
       segments,
@@ -204,13 +187,10 @@ export default function BigCycleClock({
       medBear,
       avgDays,
       progress,
-      angle,
-      winStartAngle,
-      boundaryAngle,
       predictedSwitchDate,
       winStart,
       winEnd,
-      phaseName,
+      winStartProgress,
     };
   }, [nasdaq]);
 
@@ -224,13 +204,6 @@ export default function BigCycleClock({
     };
   }, [timing]);
 
-  const size = 420;
-  const cx = 210;
-  const cy = 210;
-  const r = 165;
-  const strokeW = 18;
-  const pointerR = 145;
-
   if (!calc) {
     return (
       <div className="w-full max-w-[520px]">
@@ -242,14 +215,11 @@ export default function BigCycleClock({
   }
 
   const currentIsBear = calc.current.regime === "BEAR";
-  const pointer = polarToCartesian(cx, cy, pointerR, calc.angle);
-  const bearBase = describeArc(cx, cy, r, 0, 180);
-  const bullBase = describeArc(cx, cy, r, 180, 360);
-  const progArc = describeArc(cx, cy, r, currentIsBear ? 0 : 180, calc.angle);
-  const winArc = describeArc(cx, cy, r, calc.winStartAngle, calc.boundaryAngle);
-
   const currentLabel = currentIsBear ? labels.bear : labels.bull;
   const predictedLabel = currentIsBear ? labels.bull : labels.bear;
+  const stage =
+    calc.progress < 0.33 ? labels.stageEarly : calc.progress < 0.66 ? labels.stageMid : labels.stageLate;
+  const inLikelyWindow = calc.progress >= calc.winStartProgress;
 
   const fmtDate = (d: Date | null) => {
     if (!d) return "—";
@@ -262,97 +232,106 @@ export default function BigCycleClock({
   return (
     <div className="w-full max-w-[520px]">
       <div className="flex flex-col items-center">
-        <svg viewBox={`0 0 ${size} ${size}`} className="w-full h-auto">
-          {/* base ring */}
-          <path d={bearBase} fill="none" stroke="#fee2e2" strokeWidth={strokeW} strokeLinecap="round" />
-          <path d={bullBase} fill="none" stroke="#dcfce7" strokeWidth={strokeW} strokeLinecap="round" />
+        <div className="w-full rounded-2xl border border-slate-100 bg-white p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm font-bold text-slate-900">{labels.title}</div>
+            <span
+              className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold border"
+              style={{
+                backgroundColor: (currentIsBear ? "#fee2e2" : "#dcfce7"),
+                color: currentIsBear ? "#b91c1c" : "#15803d",
+                borderColor: currentIsBear ? "#fecaca" : "#bbf7d0",
+              }}
+            >
+              {currentLabel}
+            </span>
+          </div>
 
-          {/* progress */}
-          <path
-            d={progArc}
-            fill="none"
-            stroke={currentIsBear ? "#ef4444" : "#22c55e"}
-            strokeWidth={strokeW}
-            strokeLinecap="round"
-          />
+          <div className="mt-1 text-xs text-slate-500">
+            {labels.asOf}: <span className="font-mono text-slate-900">{calc.current.end}</span> · {labels.started}:{" "}
+            <span className="font-mono text-slate-900">{calc.current.start}</span>
+          </div>
 
-          {/* expected window (cycle-based) */}
-          <path
-            d={winArc}
-            fill="none"
-            stroke="#94a3b8"
-            strokeWidth={strokeW}
-            strokeDasharray="4 6"
-            strokeLinecap="round"
-            opacity={0.9}
-          />
+          <div className="mt-4">
+            <div className="flex items-center justify-between text-xs text-slate-600 mb-2">
+              <div>
+                {labels.gaugeProgress}: <span className="font-semibold text-slate-900">{stage}</span>
+                <span className="text-slate-500"> · {inLikelyWindow ? labels.windowInside : labels.windowBefore}</span>
+              </div>
+              <div className="text-slate-400">{labels.cycleEta}: {fmtDate(calc.predictedSwitchDate)}</div>
+            </div>
 
-          {/* pointer */}
-          <line x1={cx} y1={cy} x2={pointer.x} y2={pointer.y} stroke="#0f172a" strokeWidth={3} strokeLinecap="round" />
-          <circle cx={cx} cy={cy} r={6} fill="#0f172a" />
+            <div className="relative h-3 rounded-full bg-slate-100 overflow-hidden">
+              <div
+                className="absolute inset-y-0 left-0"
+                style={{
+                  width: `${Math.round(calc.progress * 1000) / 10}%`,
+                  backgroundColor: currentIsBear ? "#ef4444" : "#22c55e",
+                }}
+              />
+              <div
+                className="absolute inset-y-0 border border-slate-400/60 border-dashed bg-slate-200/40"
+                style={{
+                  left: `${Math.round(calc.winStartProgress * 1000) / 10}%`,
+                  width: `${Math.round((1 - calc.winStartProgress) * 1000) / 10}%`,
+                }}
+              />
+              <div
+                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 h-3.5 w-3.5 rounded-full border-2 border-white bg-slate-900"
+                style={{ left: `${Math.round(calc.progress * 1000) / 10}%` }}
+              />
+            </div>
 
-          {/* labels */}
-          <text x={cx} y={42} textAnchor="middle" fontSize="14" fill="#b91c1c" fontWeight="700">
-            {labels.bear}
-          </text>
-          <text x={cx} y={size - 24} textAnchor="middle" fontSize="14" fill="#15803d" fontWeight="700">
-            {labels.bull}
-          </text>
+            <div className="mt-2 flex justify-between text-[11px] text-slate-400">
+              <span>{labels.gaugeStart}</span>
+              <span>{labels.gaugeLikely}</span>
+              <span>{labels.gaugeRef}</span>
+            </div>
 
-          {/* center text */}
-          <text x={cx} y={cy - 24} textAnchor="middle" fontSize="14" fill="#0f172a" fontWeight="700">
-            {labels.now}: {currentLabel}
-          </text>
-          <text x={cx} y={cy - 4} textAnchor="middle" fontSize="12" fill="#334155">
-            {labels.started}: {calc.current.start}
-          </text>
-          <text x={cx} y={cy + 14} textAnchor="middle" fontSize="12" fill="#334155">
-            {labels.elapsed}: {calc.current.days}{labels.days}
-          </text>
-          <text x={cx} y={cy + 34} textAnchor="middle" fontSize="12" fill="#334155">
-            {labels.cycleEta}: {predictedLabel} → {fmtDate(calc.predictedSwitchDate)}
-          </text>
-        </svg>
+            <div className="mt-2 text-[11px] text-slate-500 leading-relaxed">{labels.gaugeHint}</div>
+          </div>
+        </div>
 
         <div className="w-full mt-2 space-y-2">
           <div className="rounded-xl border border-slate-100 bg-white p-3">
-            <div className="text-xs font-bold text-slate-900 mb-1">{labels.recent}</div>
-            <div className="grid grid-cols-1 gap-1 text-xs text-slate-600">
-              {calc.prev ? (
-                <div>
-                  {calc.prev.regime === "BEAR" ? labels.bear : labels.bull}: {calc.prev.start} → {calc.prev.end} ({calc.prev.days}{labels.days})
-                </div>
-              ) : (
-                <div className="text-slate-400">—</div>
-              )}
+            <div className="text-xs font-bold text-slate-900 mb-1">{labels.summary}</div>
+            <div className="space-y-1.5 text-xs text-slate-600 leading-relaxed">
               <div>
-                {labels.windowCycle}: {calc.winStart ? fmtDate(calc.winStart) : "—"} → {calc.winEnd ? fmtDate(calc.winEnd) : "—"}
-                <span className="text-slate-400"> (cycle-based)</span>
+                {labels.asOf}: <span className="font-mono text-slate-900">{calc.current.end}</span>
               </div>
+              <div>
+                {labels.now}: <span className="font-semibold text-slate-900">{currentLabel}</span> · {labels.started}:{" "}
+                <span className="font-mono text-slate-900">{calc.current.start}</span>
+              </div>
+              <div>
+                {labels.cycleEta}: <span className="font-mono text-slate-900">{fmtDate(calc.predictedSwitchDate)}</span>{" "}
+                <span className="text-slate-500">({predictedLabel})</span>
+              </div>
+              <div>
+                {labels.windowCycle}: <span className="font-mono text-slate-900">{calc.winStart ? fmtDate(calc.winStart) : "—"}</span> ~{" "}
+                <span className="font-mono text-slate-900">{calc.winEnd ? fmtDate(calc.winEnd) : "—"}</span>{" "}
+                <span className="text-slate-400">({labels.windowCycleNote})</span>
+              </div>
+
               {model ? (
-                <div className="text-slate-500">
-                  {labels.modelEta}:
-                  <div className="mt-1 space-y-0.5 pl-2">
-                    <div>
-                      • {labels.crisisModel}: {model.crisisEta || "—"}
-                      {model.crisisWin ? ` · ${labels.windowModel}: ${model.crisisWin}` : ""}
-                    </div>
-                    <div>
-                      • {labels.overheatModel}: {model.euphoriaEta || "—"}
-                      {model.euphoriaWin ? ` · ${labels.windowModel}: ${model.euphoriaWin}` : ""}
-                    </div>
-                  </div>
+                <div className="pt-1">
+                  {labels.crisisModel}: <span className="font-mono text-slate-900">{model.crisisWin || model.crisisEta || "—"}</span>
+                  <span className="text-slate-400">{model.crisisWin ? "" : lang === "ko" ? " (ETA 참고)" : " (ETA ref.)"}</span>
+                  <br />
+                  {labels.overheatModel}: <span className="font-mono text-slate-900">{model.euphoriaWin || model.euphoriaEta || "—"}</span>
+                  <span className="text-slate-400">{model.euphoriaWin ? "" : lang === "ko" ? " (ETA 참고)" : " (ETA ref.)"}</span>
                 </div>
               ) : null}
 
-              <div className="mt-2 text-[11px] text-slate-500 leading-relaxed">
-                <div className="font-semibold text-slate-600 mb-0.5">{labels.termsTitle}</div>
-                <div>• {labels.termsLine1}</div>
-                <div>• {labels.termsLine2}</div>
-                <div>• {labels.termsLine3}</div>
-                <div className="mt-1 text-slate-400">* {labels.ruleDetail}</div>
-                <div className="text-slate-400">* {labels.ruleNote}</div>
-              </div>
+              {calc.prev ? (
+                <div className="pt-1 text-slate-500">
+                  {labels.recent}: {calc.prev.regime === "BEAR" ? labels.bear : labels.bull} {calc.prev.start} → {calc.prev.end}
+                </div>
+              ) : null}
+
+              <div className="pt-1 text-[11px] text-slate-500">{labels.note}</div>
+              <div className="text-[11px] text-slate-400">* {labels.ruleDetail}</div>
+              <div className="text-[11px] text-slate-400">* {labels.ruleNote}</div>
             </div>
           </div>
         </div>
