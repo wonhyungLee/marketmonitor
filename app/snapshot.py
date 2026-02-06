@@ -109,18 +109,34 @@ def build_snapshot(conn, as_of_date: Optional[date] = None, data_frame: Optional
 
     # --- 퀀트 로직 고도화 ---
 
-    # 1. EWMA Volatility 및 Trend (MA200)
+    # 1. EWMA Volatility 및 Trend (MA200) - use daily close (1 per date)
     trend = {"signal": "UNKNOWN", "vol_ann": None}
     px_df = _series_frame(df, settings.trend_series_id, as_of_date, tz)
-    if len(px_df) >= 200:
-        price = float(px_df.iloc[-1]["value"])
-        ma200 = float(px_df.tail(200)["value"].mean())
-        
-        # EWMA Volatility: 최근 변동성에 더 높은 가중치 (span=20)
-        returns = px_df["value"].pct_change().tail(21).dropna()
-        ewma_vol = float(returns.ewm(span=20).std().iloc[-1] * math.sqrt(252))
-        
-        trend.update({"price": price, "ma": ma200, "signal": "UP" if price >= ma200 else "DOWN", "vol_ann": ewma_vol})
+    if not px_df.empty:
+        daily = (
+            px_df.sort_values("timestamp")
+            .groupby("as_of_date", as_index=False)
+            .last()
+        )
+        if len(daily) >= 200:
+            price = float(daily.iloc[-1]["value"])
+            ma200 = float(daily.tail(200)["value"].mean())
+
+            # EWMA Volatility: 최근 변동성에 더 높은 가중치 (span=20)
+            returns = daily["value"].pct_change().tail(21).dropna()
+            if not returns.empty:
+                ewma_vol = float(returns.ewm(span=20).std().iloc[-1] * math.sqrt(252))
+            else:
+                ewma_vol = None
+
+            trend.update(
+                {
+                    "price": price,
+                    "ma": ma200,
+                    "signal": "UP" if price >= ma200 else "DOWN",
+                    "vol_ann": ewma_vol,
+                }
+            )
 
     # 2. LKV (Last Known Value) Helper
     def get_lkv_value(sid: str) -> Optional[float]:

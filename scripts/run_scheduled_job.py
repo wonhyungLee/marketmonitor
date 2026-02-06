@@ -1,4 +1,10 @@
 import logging
+import sys
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+# Allow running as `python scripts/run_scheduled_job.py` without PYTHONPATH.
+sys.path.insert(0, str(BASE_DIR))
 
 from app.settings import get_settings
 from scripts.run_daily import run_daily_job

@@ -117,7 +117,6 @@ class PortfolioRecommendation:
     weights: Dict[str, float]
     diagnostics: Dict[str, Dict]
 
-
 @lru_cache(maxsize=1)
 def _load_asset_universe_from_csv() -> pd.DataFrame:
     settings = get_settings()

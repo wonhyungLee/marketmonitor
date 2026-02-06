@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
+import sys
 import argparse
 from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+# Allow running as `python scripts/export_timing_v1.py` without PYTHONPATH.
+sys.path.insert(0, str(BASE_DIR))
+
 from app.timing_v1 import export_timing_v1_daily
 
 if __name__ == "__main__":

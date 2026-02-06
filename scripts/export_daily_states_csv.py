@@ -1,5 +1,10 @@
+import sys
 import argparse
 from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+# Allow running as `python scripts/...` without PYTHONPATH.
+sys.path.insert(0, str(BASE_DIR))
 
 from app import db
 from app.exporter import export_daily_states_csv

@@ -1,3 +1,10 @@
+import sys
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+# Allow running as `python scripts/init_db.py` without PYTHONPATH.
+sys.path.insert(0, str(BASE_DIR))
+
 from app import db
 from app.settings import get_settings
 

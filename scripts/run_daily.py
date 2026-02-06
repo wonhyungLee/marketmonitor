@@ -1,4 +1,5 @@
 import logging
+import sys
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -6,6 +7,10 @@ from typing import Optional
 
 import pandas as pd
 from zoneinfo import ZoneInfo
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+# Allow running as `python scripts/run_daily.py` without PYTHONPATH.
+sys.path.insert(0, str(BASE_DIR))
 
 from app import db
 from app.exporter import (
