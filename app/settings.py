@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     )
     db_path: str = Field("./warroom.db", env="DB_PATH")
     discord_webhook_url: str = Field("", env="DISCORD_WEBHOOK_URL")
-    discord_site_url: str = Field("http://price.p-e.kr/site2/", env="DISCORD_SITE_URL")
+    discord_site_url: str = Field("http://price.r-e.kr/site2/", env="DISCORD_SITE_URL")
     # Discord notifications
     discord_enabled: bool = Field(True, env="DISCORD_ENABLED")
     discord_timeout_sec: int = Field(8, env="DISCORD_TIMEOUT_SEC")
