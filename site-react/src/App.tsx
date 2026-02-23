@@ -18,7 +18,7 @@ import { useWarRoomData } from "@/hooks/useWarRoomData";
 import { cn } from "@/lib/utils";
 import { RefreshCw, Search, Filter, Maximize2, X, RotateCcw, Languages, ChevronDown, ChevronUp } from "lucide-react";
 import CycleRibbon from "@/components/CycleRibbon";
-import CoupangAutoPopup from "@/components/CoupangAutoPopup";
+import CoupangTraderComboInline from "@/components/CoupangTraderComboInline";
 import type { MarketStateRow } from "@/types";
 
 const STATE_COLORS = {
@@ -32,6 +32,90 @@ const STATE_ORDER = ["WARMUP", "NORMAL", "DEFCON2", "DEFCON1"];
 
 type Period = "day" | "week" | "month";
 type Lang = "en" | "ko";
+
+const US_HOLIDAY_CACHE = new Map<number, Set<string>>();
+
+function observedFixedHoliday(year: number, month: number, day: number): string {
+  const d = new Date(year, month - 1, day);
+  const dow = d.getDay();
+  if (dow === 6) d.setDate(d.getDate() - 1); // Saturday -> Friday observed
+  else if (dow === 0) d.setDate(d.getDate() + 1); // Sunday -> Monday observed
+  return format(d, "yyyy-MM-dd");
+}
+
+function nthWeekdayOfMonth(year: number, month: number, weekday: number, nth: number): string {
+  const first = new Date(year, month - 1, 1);
+  const offset = (weekday - first.getDay() + 7) % 7;
+  const day = 1 + offset + (nth - 1) * 7;
+  return format(new Date(year, month - 1, day), "yyyy-MM-dd");
+}
+
+function lastWeekdayOfMonth(year: number, month: number, weekday: number): string {
+  const last = new Date(year, month, 0);
+  const offset = (last.getDay() - weekday + 7) % 7;
+  last.setDate(last.getDate() - offset);
+  return format(last, "yyyy-MM-dd");
+}
+
+function easterSunday(year: number): Date {
+  // Anonymous Gregorian algorithm
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+}
+
+function usMarketHolidaySet(year: number): Set<string> {
+  const cached = US_HOLIDAY_CACHE.get(year);
+  if (cached) return cached;
+
+  const set = new Set<string>();
+  set.add(observedFixedHoliday(year, 1, 1)); // New Year
+  set.add(nthWeekdayOfMonth(year, 1, 1, 3)); // MLK Day
+  set.add(nthWeekdayOfMonth(year, 2, 1, 3)); // Presidents' Day
+  const gf = easterSunday(year);
+  gf.setDate(gf.getDate() - 2); // Good Friday
+  set.add(format(gf, "yyyy-MM-dd"));
+  set.add(lastWeekdayOfMonth(year, 5, 1)); // Memorial Day
+  set.add(observedFixedHoliday(year, 6, 19)); // Juneteenth
+  set.add(observedFixedHoliday(year, 7, 4)); // Independence Day
+  set.add(nthWeekdayOfMonth(year, 9, 1, 1)); // Labor Day
+  set.add(nthWeekdayOfMonth(year, 11, 4, 4)); // Thanksgiving
+  set.add(observedFixedHoliday(year, 12, 25)); // Christmas
+
+  US_HOLIDAY_CACHE.set(year, set);
+  return set;
+}
+
+function isUsMarketHoliday(dateStr: string): boolean {
+  const d = parseISO(dateStr);
+  if (Number.isNaN(d.getTime())) return false;
+  const y = d.getFullYear();
+  return (
+    usMarketHolidaySet(y - 1).has(dateStr) ||
+    usMarketHolidaySet(y).has(dateStr) ||
+    usMarketHolidaySet(y + 1).has(dateStr)
+  );
+}
+
+function isUsTradingDay(dateStr: string): boolean {
+  const d = parseISO(dateStr);
+  if (Number.isNaN(d.getTime())) return false;
+  const dow = d.getDay();
+  if (dow === 0 || dow === 6) return false;
+  return !isUsMarketHoliday(dateStr);
+}
 
 const TRANSLATIONS = {
   en: {
@@ -353,6 +437,8 @@ export default function App() {
     sortedKeys.forEach(key => {
       const rows = grouped.get(key)!;
       const lastRow = rows[rows.length - 1];
+      const representativeDate =
+        [...rows].reverse().find((r) => isUsTradingDay(r.date))?.date || lastRow.date || key;
       
       const validScores = rows.map(r => r.score).filter(s => s !== null) as number[];
       const avgScore = validScores.length ? validScores.reduce((a, b) => a + b, 0) / validScores.length : null;
@@ -363,7 +449,7 @@ export default function App() {
 
       newStates.push({
         ...lastRow,
-        date: key,
+        date: representativeDate,
         state: dominantState,
         score: avgScore,
         triggers: `${rows.length} days aggregated. Last: ${lastRow.triggers}`
@@ -412,6 +498,14 @@ export default function App() {
 
 
 
+
+  const tradingDaySet = useMemo(() => {
+    return new Set(
+      (data?.nasdaq || [])
+        .filter((n) => n.close !== null && isUsTradingDay(n.date))
+        .map((n) => n.date)
+    );
+  }, [data?.nasdaq]);
 
   const latestTiming = useMemo(() => {
     const rows = data?.timingV1 || [];
@@ -483,8 +577,7 @@ export default function App() {
     rows = rows.filter(r => enabledStates.has(r.state));
 
     if (onlyTradingDays && period === "day") {
-      const tradingDays = new Set(data?.nasdaq.filter(n => n.close !== null).map(n => n.date));
-      rows = rows.filter(r => tradingDays.has(r.date));
+      rows = rows.filter((r) => tradingDaySet.has(r.date));
     }
 
     if (searchTerm) {
@@ -539,12 +632,19 @@ export default function App() {
     portfolioDates,
     forecastMap,
     forecastHorizon,
+    tradingDaySet,
   ]);
 
   // Chart Data
   const chartData = useMemo(() => {
     if (!aggregatedData || !data) return [];
-    const rangeRows = aggregatedData.states.filter((r) => r.date >= dateRange.start && r.date <= dateRange.end);
+    let rangeRows = aggregatedData.states.filter(
+      (r) => r.date >= dateRange.start && r.date <= dateRange.end && enabledStates.has(r.state)
+    );
+
+    if (onlyTradingDays && period === "day") {
+      rangeRows = rangeRows.filter((r) => tradingDaySet.has(r.date));
+    }
     
     const nasdaqMap = new Map(data.nasdaq.map((n) => [n.date, n.close]));
     
@@ -559,13 +659,13 @@ export default function App() {
 
       return {
         date: s.date,
-        close: close || null,
+        close: close ?? null,
         state: s.state,
         score: s.score,
         triggers: s.triggers,
       };
     });
-  }, [aggregatedData, data, dateRange, period]);
+  }, [aggregatedData, data, dateRange, period, enabledStates, onlyTradingDays, tradingDaySet]);
 
   // State Mix Stats
   const stateCounts = useMemo(() => {
@@ -820,9 +920,6 @@ export default function App() {
 
   return (
     <div className={cn("min-h-screen bg-slate-50 p-4 md:p-6 lg:p-8 font-sans", isExpanded && "overflow-hidden")}>
-      {/* Opens on first eligible click once per 6h window */}
-      <CoupangAutoPopup disabled={isExpanded || showDetailPopup} />
-      
       {/* Detail Popup */}
       {showDetailPopup && lastSelectedDate && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-in fade-in duration-200" onClick={() => setShowDetailPopup(false)}>
@@ -1070,6 +1167,10 @@ export default function App() {
             </button>
           </div>
         </header>
+
+        <section className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+          <CoupangTraderComboInline />
+        </section>
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* Main Chart + Table Section (Left/Top) */}
@@ -1458,65 +1559,67 @@ export default function App() {
                 <>
                   {!showForecastChart ? (
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 bg-slate-50 border border-slate-100 rounded-xl p-4">
-                      {(() => {
-                        const last = data?.forecastV1?.[data.forecastV1.length - 1] as any;
-                        if (!last) return <div className="text-sm text-slate-600">—</div>;
-                        const c = last?.[`p_crisis_${forecastHorizon}`];
-                        const e = last?.[`p_euphoria_${forecastHorizon}`];
-                        const n = last?.[`net_${forecastHorizon}`] ?? (typeof c === "number" && typeof e === "number" ? e - c : null);
+                        {(() => {
+                          const last = data?.forecastV1?.[data.forecastV1.length - 1] as any;
+                          if (!last) return <div className="text-sm text-slate-600">—</div>;
+                          const c = last?.[`p_crisis_${forecastHorizon}`];
+                          const e = last?.[`p_euphoria_${forecastHorizon}`];
+                          const n = last?.[`net_${forecastHorizon}`] ?? (typeof c === "number" && typeof e === "number" ? e - c : null);
 
-                        const label = (() => {
-                          if (typeof n !== "number" || !Number.isFinite(n)) return lang === "ko" ? "해석 불가" : "Unknown";
-                          if (n >= 0.15) return lang === "ko" ? "환희 우세(강)" : "Strong overheat bias";
-                          if (n >= 0.05) return lang === "ko" ? "환희 우세" : "Overheat bias";
-                          if (n <= -0.15) return lang === "ko" ? "위기 우세(강)" : "Strong risk-off bias";
-                          if (n <= -0.05) return lang === "ko" ? "위기 우세" : "Risk-off bias";
-                          return lang === "ko" ? "중립/혼조" : "Mixed/neutral";
-                        })();
+                          const label = (() => {
+                            if (typeof n !== "number" || !Number.isFinite(n)) return lang === "ko" ? "해석 불가" : "Unknown";
+                            if (n >= 0.15) return lang === "ko" ? "환희 우세(강)" : "Strong overheat bias";
+                            if (n >= 0.05) return lang === "ko" ? "환희 우세" : "Overheat bias";
+                            if (n <= -0.15) return lang === "ko" ? "위기 우세(강)" : "Strong risk-off bias";
+                            if (n <= -0.05) return lang === "ko" ? "위기 우세" : "Risk-off bias";
+                            return lang === "ko" ? "중립/혼조" : "Mixed/neutral";
+                          })();
 
-                        const pillClass = (() => {
-                          if (typeof n !== "number" || !Number.isFinite(n)) return "bg-slate-100 text-slate-700 border-slate-200";
-                          if (n >= 0.05) return "bg-green-50 text-green-700 border-green-100";
-                          if (n <= -0.05) return "bg-red-50 text-red-700 border-red-100";
-                          return "bg-blue-50 text-blue-700 border-blue-100";
-                        })();
+                          const pillClass = (() => {
+                            if (typeof n !== "number" || !Number.isFinite(n)) return "bg-slate-100 text-slate-700 border-slate-200";
+                            if (n >= 0.05) return "bg-green-50 text-green-700 border-green-100";
+                            if (n <= -0.05) return "bg-red-50 text-red-700 border-red-100";
+                            return "bg-blue-50 text-blue-700 border-blue-100";
+                          })();
 
-                        return (
-                          <div className="w-full space-y-1">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="text-sm text-slate-600">
-                                {lang === "ko"
-                                  ? `최근 데이터 기준으로, ${forecastHorizon} 뒤 시점은 “${label}”로 해석됩니다(확정 아님).`
-                                  : `As of the latest row, the ${forecastHorizon}-ahead state reads as “${label}” (not a guarantee).`}
+                          return (
+                            <div className="w-full space-y-1">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="text-sm text-slate-600">
+                                  {lang === "ko"
+                                    ? `최근 데이터 기준으로, ${forecastHorizon} 뒤 시점은 “${label}”로 해석됩니다(확정 아님).`
+                                    : `As of the latest row, the ${forecastHorizon}-ahead state reads as “${label}” (not a guarantee).`}
+                                </div>
+                                <span className={cn("px-2 py-1 rounded-lg text-xs font-bold border", pillClass)}>{label}</span>
                               </div>
-                              <span className={cn("px-2 py-1 rounded-lg text-xs font-bold border", pillClass)}>{label}</span>
+                              <div className="text-[11px] text-slate-500">
+                                {lang === "ko"
+                                  ? "차트는 숨김 상태입니다. 필요하면 ‘차트 보기’를 눌러 확인하세요."
+                                  : "Chart is hidden. Click ‘Show’ to view."}
+                              </div>
                             </div>
-                            <div className="text-[11px] text-slate-500">
-                              {lang === "ko"
-                                ? "차트는 숨김 상태입니다. 필요하면 ‘차트 보기’를 눌러 확인하세요."
-                                : "Chart is hidden. Click ‘Show’ to view."}
-                            </div>
-                          </div>
-                        );
-                      })()}
+                          );
+                        })()}
                     </div>
                   ) : (
-                    <div className="h-[320px]">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <LineChart data={forecastChart.data}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                          <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={30} />
-                          <YAxis domain={[0, 1]} tick={{ fontSize: 11 }} />
-                          <Tooltip
-                            formatter={(v: any) => (typeof v === "number" ? `${Math.round(v * 100)}%` : v)}
-                            labelFormatter={(l: any) => `${l}`}
-                            contentStyle={{ borderRadius: "10px" }}
-                          />
-                          <Line type="monotone" dataKey="p_crisis" name={t.crisis} dot={false} stroke="#ef4444" strokeWidth={1.8} isAnimationActive={false} />
-                          <Line type="monotone" dataKey="p_euphoria" name={t.euphoria} dot={false} stroke="#22c55e" strokeWidth={1.8} isAnimationActive={false} />
-                          <Line type="monotone" dataKey="net" name={t.net} dot={false} stroke="#1d4ed8" strokeWidth={1.4} isAnimationActive={false} />
-                        </LineChart>
-                      </ResponsiveContainer>
+                    <div className="mt-3">
+                      <div className="h-[320px]">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={forecastChart.data}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                            <XAxis dataKey="date" tick={{ fontSize: 11 }} minTickGap={30} />
+                            <YAxis domain={[0, 1]} tick={{ fontSize: 11 }} />
+                            <Tooltip
+                              formatter={(v: any) => (typeof v === "number" ? `${Math.round(v * 100)}%` : v)}
+                              labelFormatter={(l: any) => `${l}`}
+                              contentStyle={{ borderRadius: "10px" }}
+                            />
+                            <Line type="monotone" dataKey="p_crisis" name={t.crisis} dot={false} stroke="#ef4444" strokeWidth={1.8} isAnimationActive={false} />
+                            <Line type="monotone" dataKey="p_euphoria" name={t.euphoria} dot={false} stroke="#22c55e" strokeWidth={1.8} isAnimationActive={false} />
+                            <Line type="monotone" dataKey="net" name={t.net} dot={false} stroke="#1d4ed8" strokeWidth={1.4} isAnimationActive={false} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
                     </div>
                   )}
                 </>

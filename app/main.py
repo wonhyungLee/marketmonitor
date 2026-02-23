@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from app import db
+from app.coupang_ads import build_trader_combo_payload
 from app.models import TradingViewPayload, _load_json_loose
 from app.paths import find_indicator_dir, repo_root
 from app.settings import get_settings
@@ -27,13 +28,53 @@ app = FastAPI(title="WarRoom v2.1 - Institutional", version="2.1")
 BASE_DIR = repo_root()
 SITE_DIR = BASE_DIR / "site"
 DATA_DIR = BASE_DIR / "data"
-SITE2_DIR = BASE_DIR / "site-react" / "dist"
+PRIMARY_SITE2_DIR = Path("/home/ubuntu/html5/site2")
+FALLBACK_SITE2_DIR = BASE_DIR / "site-react" / "dist"
+
+
+def resolve_site2_dir() -> Path | None:
+    for candidate in (PRIMARY_SITE2_DIR, FALLBACK_SITE2_DIR):
+        if candidate.exists() and (candidate / "index.html").is_file():
+            return candidate
+    return None
+
+
+SITE2_DIR = resolve_site2_dir()
 INDICATOR_DIR = find_indicator_dir(BASE_DIR)
+
+
+def _build_coupang_combo_response(
+    theme: str | None = None,
+    subId: str | None = None,
+    category: str | None = "food",
+) -> JSONResponse:
+    try:
+        payload = build_trader_combo_payload(theme=theme, sub_id=subId, category=category)
+        return JSONResponse(payload)
+    except Exception as exc:
+        # Do not break page render on ad API errors.
+        return JSONResponse({"ok": False, "items": [], "message": str(exc)})
+
 
 if SITE_DIR.exists():
     app.mount("/site", StaticFiles(directory=SITE_DIR, html=True), name="site")
-if SITE2_DIR.exists():
-    app.mount("/site2", StaticFiles(directory=SITE2_DIR, html=True), name="site2")
+if SITE2_DIR is not None and SITE2_DIR.exists():
+    site2_app = FastAPI(title="site2", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @site2_app.get("/api/coupang-trader-combo")
+    def site2_coupang_trader_combo(theme: str | None = None, subId: str | None = None, category: str | None = "food"):
+        return _build_coupang_combo_response(theme=theme, subId=subId, category=category)
+
+    @site2_app.get("/api/coupang-food-ads")
+    def site2_coupang_food_ads(theme: str | None = None, subId: str | None = None):
+        return _build_coupang_combo_response(theme=theme, subId=subId, category="food")
+
+    # Keep SPA/static behavior for everything else under /site2.
+    site2_app.mount("/", StaticFiles(directory=SITE2_DIR, html=True), name="site2-static")
+    app.mount("/site2", site2_app, name="site2")
+    logger.info("site2 mount path: %s", SITE2_DIR)
+else:
+    logger.warning("site2 static directory not found (expected html5/site2 or site-react/dist)")
 if DATA_DIR.exists():
     app.mount("/data", StaticFiles(directory=DATA_DIR), name="data")
 if INDICATOR_DIR.exists():
@@ -72,8 +113,21 @@ def health() -> dict:
     return {"status": "ok", "version": "2.1"}
 
 
+@app.get("/api/coupang-trader-combo")
+def coupang_trader_combo(theme: str | None = None, subId: str | None = None, category: str | None = "food"):
+    """3-item Coupang combo payload for inline widget."""
+    return _build_coupang_combo_response(theme=theme, subId=subId, category=category)
+
+
+@app.get("/api/coupang-food-ads")
+def coupang_food_ads(theme: str | None = None, subId: str | None = None):
+    """Food-focused Coupang ads endpoint for site2 widget."""
+    return _build_coupang_combo_response(theme=theme, subId=subId, category="food")
+
+
 @app.post("/order")
 @app.post("/webhook/{webhook_token}")
+@app.post("/webhook")
 async def ingest(request: Request, background_tasks: BackgroundTasks, webhook_token: str | None = None):
     """Unified webhook ingest endpoint.
 
